@@ -12,6 +12,8 @@ class AudioPlayer {
         this._enabled = true;
         this._currentSource = null; // Currently playing AudioBufferSourceNode
         this._maxQueueSize = 10;    // Max buffers in queue before dropping old ones
+        // Callback fired when playback state changes: (isPlaying: boolean) => void
+        this.onPlayStateChange = null;
     }
 
     /**
@@ -103,10 +105,12 @@ class AudioPlayer {
         const currentTime = this.audioContext.currentTime;
         const startTime = Math.max(currentTime, this._nextStartTime);
 
+        const wasPlaying = this._isPlaying;
         source.start(startTime);
         this._nextStartTime = startTime + buffer.duration;
         this._currentSource = source;
         this._isPlaying = true;
+        if (!wasPlaying) this.onPlayStateChange?.(true);
 
         source.onended = () => {
             if (this._queue.length > 0) {
@@ -114,6 +118,7 @@ class AudioPlayer {
             } else {
                 this._isPlaying = false;
                 this._currentSource = null;
+                this.onPlayStateChange?.(false);
             }
         };
     }
@@ -140,6 +145,7 @@ class AudioPlayer {
             this.audioContext.close().catch(() => {});
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         }
+        this.onPlayStateChange?.(false);
     }
 
     /**

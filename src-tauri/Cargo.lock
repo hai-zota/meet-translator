@@ -2471,6 +2471,7 @@ version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "coreaudio-sys",
  "cpal",
  "dirs",
  "ebur128",

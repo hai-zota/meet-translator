@@ -23,6 +23,8 @@ class ElevenLabsTTS {
         this._reconnectAttempts = 0;
         this._maxReconnectAttempts = 3;
         this._intentionalClose = false;
+        this._maxQueueDepth = 0;
+        this._queueDepthAlertThreshold = 5;
 
         // Instrumentation
         this._sendTimestamps = {};  // text -> timestamp
@@ -159,6 +161,10 @@ class ElevenLabsTTS {
         } else {
             // Queue and connect if needed
             this._textQueue.push({ text, meta });
+            if (this._textQueue.length > this._maxQueueDepth) this._maxQueueDepth = this._textQueue.length;
+            if (this._textQueue.length > this._queueDepthAlertThreshold) {
+                console.warn(`[ElevenLabs] Queue: ${this._textQueue.length} items (max: ${this._maxQueueDepth})`);
+            }
             if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
                 this.connect();
             }

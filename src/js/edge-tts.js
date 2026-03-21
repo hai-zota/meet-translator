@@ -13,6 +13,9 @@ class EdgeTTSRust {
         this.isConnected = false;
         this._queue = [];
         this._isSpeaking = false;
+        this._logCounter = 0;
+        this._maxQueueDepth = 0;
+        this._queueDepthAlertThreshold = 5;
 
         // Same callback interface as other TTS providers
         this.onAudioChunk = null;
@@ -34,6 +37,10 @@ class EdgeTTSRust {
     speak(text, meta = null) {
         if (!text?.trim()) return;
         this._queue.push({ text: text.trim(), meta });
+        if (this._queue.length > this._maxQueueDepth) this._maxQueueDepth = this._queue.length;
+        if (this._queue.length > this._queueDepthAlertThreshold) {
+            console.warn(`[Edge TTS] Queue: ${this._queue.length} items (max: ${this._maxQueueDepth})`);
+        }
         if (!this._isSpeaking) {
             this._processQueue();
         }
@@ -59,7 +66,10 @@ class EdgeTTSRust {
             });
 
             const elapsed = performance.now() - startTime;
-            console.log(`[Edge TTS] Audio received in ${elapsed.toFixed(0)}ms`);
+            this._logCounter++;
+            if (elapsed >= 1800 || this._logCounter % 10 === 0) {
+                console.log(`[Edge TTS] Audio received in ${elapsed.toFixed(0)}ms`);
+            }
 
             if (this.onAudioChunk) {
                 this.onAudioChunk(base64Audio, true, meta);
@@ -74,9 +84,11 @@ class EdgeTTSRust {
     }
 
     disconnect() {
+        if (this._queue.length > 0) console.warn(`[Edge TTS] Disconnect: ${this._queue.length} items in queue`);
         this._queue = [];
         this._isSpeaking = false;
         this.isConnected = false;
+        this._maxQueueDepth = 0;
         this._setStatus('disconnected');
     }
 

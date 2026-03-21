@@ -5,32 +5,69 @@ use std::sync::Arc;
 
 use super::TARGET_SAMPLE_RATE;
 
-/// Microphone capture using cpal.
-/// Captures from the default input device and converts to PCM s16le 16kHz mono.
+// ── Platform dispatch ────────────────────────────────────────────────────────
+//
+// On macOS: try AUVoiceIO (hardware AEC) first; fall back to cpal if unavailable.
+// On other platforms: cpal only.
+
+/// Microphone capture. On macOS tries AUVoiceIO (hardware AEC) with cpal fallback.
 pub struct MicCapture {
+    #[cfg(target_os = "macos")]
+    inner: super::macos_mic::MacosMicCapture,
+
+    // cpal fallback fields (used on all platforms; on macOS only if AUVoiceIO fails)
     is_capturing: Arc<AtomicBool>,
-    /// We store the stream here to keep it alive.
-    /// cpal::Stream is !Send, so can't move to another thread.
-    /// Using Box<dyn StreamTrait> to erase the concrete type.
     _stream: Option<cpal::Stream>,
 }
 
-// SAFETY: MicCapture is only accessed through Mutex in AudioState,
-// so concurrent access is properly synchronized. The cpal::Stream
-// is created and dropped on the same thread (main thread via Tauri command).
 unsafe impl Send for MicCapture {}
 
 impl MicCapture {
     pub fn new() -> Self {
         Self {
+            #[cfg(target_os = "macos")]
+            inner: super::macos_mic::MacosMicCapture::new(),
             is_capturing: Arc::new(AtomicBool::new(false)),
             _stream: None,
         }
     }
 
-    /// Start capturing from the microphone.
-    /// Returns a receiver that yields PCM s16le 16kHz mono audio chunks.
+    /// Start capturing. Returns PCM s16le 16kHz mono chunks via mpsc::Receiver.
+    /// On macOS tries AUVoiceIO (hardware AEC); falls back to cpal on failure.
     pub fn start(&mut self) -> Result<mpsc::Receiver<Vec<u8>>, String> {
+        #[cfg(target_os = "macos")]
+        match self.inner.start() {
+            Ok(rx) => {
+                println!("[Mic] AUVoiceIO started (hardware AEC active)");
+                return Ok(rx);
+            }
+            Err(e) => {
+                eprintln!("[Mic] AUVoiceIO failed ({e}), falling back to cpal");
+            }
+        }
+        self.start_cpal()
+    }
+
+    pub fn stop(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.inner.stop();
+        self.is_capturing.store(false, Ordering::SeqCst);
+        self._stream = None;
+    }
+}
+
+impl Default for MicCapture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── cpal fallback implementation (all platforms) ─────────────────────────────
+
+impl MicCapture {
+    /// Start capturing from the microphone using cpal.
+    /// Returns a receiver that yields PCM s16le 16kHz mono audio chunks.
+    fn start_cpal(&mut self) -> Result<mpsc::Receiver<Vec<u8>>, String> {
         if self.is_capturing.load(Ordering::SeqCst) {
             return Err("Already capturing".to_string());
         }
@@ -64,11 +101,9 @@ impl MicCapture {
                     "[Mic] default_input_config failed: {}, trying supported configs",
                     e
                 );
-                // Fallback: find a supported config
                 let mut configs = device
                     .supported_input_configs()
                     .map_err(|e2| format!("No supported input configs: {}", e2))?;
-                // Prefer F32, then I16
                 configs
                     .find(|c| c.sample_format() == cpal::SampleFormat::F32)
                     .or_else(|| {
@@ -78,7 +113,6 @@ impl MicCapture {
                             .and_then(|mut c| c.next())
                     })
                     .map(|c| {
-                        // Pick sample rate: prefer 48kHz, else max
                         let rate =
                             if c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000 {
                                 cpal::SampleRate(48000)
@@ -105,7 +139,6 @@ impl MicCapture {
         self.is_capturing.store(true, Ordering::SeqCst);
         let is_capturing = self.is_capturing.clone();
 
-        // Build the input config targeting our desired format
         let stream_config = cpal::StreamConfig {
             channels: default_config.channels(),
             sample_rate: default_config.sample_rate(),
@@ -167,22 +200,8 @@ impl MicCapture {
             .play()
             .map_err(|e| format!("Failed to start mic stream: {}", e))?;
 
-        // Store stream to keep it alive
         self._stream = Some(stream);
-
         Ok(receiver)
-    }
-
-    pub fn stop(&mut self) {
-        self.is_capturing.store(false, Ordering::SeqCst);
-        // Drop the stream to stop capturing
-        self._stream = None;
-    }
-}
-
-impl Default for MicCapture {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

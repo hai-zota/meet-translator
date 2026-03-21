@@ -27,6 +27,24 @@ export class TranscriptUI {
         this.segmentsB = []; // Stream B — microphone
         this.provisionalA = { text: '', speaker: null };
         this.provisionalB = { text: '', speaker: null };
+
+        // Debounce render to avoid DOM thrashing when translations arrive rapidly
+        this._renderScheduled = false;
+        this._renderTimer = null;
+        this._renderRafId = null;
+        this._renderDebounceMs = 16; // ~1 frame at 60fps
+
+        // DOM node references for incremental patching (avoid full rebuilds)
+        this._segmentElements = new Map(); // segment object → { el, lastStatus, lastText }
+        this._segmentElementsA = new Map(); // Stream A segments
+        this._segmentElementsB = new Map(); // Stream B segments
+        this._lastRenderedSpeaker = null;
+        this._provisionalElement = null;
+        // Cache for _renderSingle incremental optimization
+        this._lastStableHtml = '';
+        this._lastProvHtml = '';
+        this._lastStableHtml = '';
+        this._lastProvHtml = '';
     }
 
     /**
@@ -48,7 +66,7 @@ export class TranscriptUI {
             if (overlay) {
                 overlay.classList.toggle('dual-view', viewMode === 'dual');
             }
-            this._render();
+            this._scheduleRender();
         }
     }
 
@@ -69,7 +87,7 @@ export class TranscriptUI {
             createdAt: Date.now(),
         });
         this._cleanupStaleOriginalsForStream(stream);
-        this._render();
+        this._scheduleRender();
     }
 
     /**
@@ -84,7 +102,7 @@ export class TranscriptUI {
         } else {
             arr.push({ original: '', translation: text, status: 'translated', speaker: null });
         }
-        this._render();
+        this._scheduleRender({ immediate: true });
     }
 
     /**
@@ -97,7 +115,7 @@ export class TranscriptUI {
         } else {
             this.provisionalB = { text, speaker: speaker || null };
         }
-        this._render();
+        this._scheduleRender();
     }
 
     // ─── Single-stream API ────────────────────────────────
@@ -116,7 +134,7 @@ export class TranscriptUI {
         });
         if (speaker) this.currentSpeaker = speaker;
         this._cleanupStaleOriginals();
-        this._render();
+        this._scheduleRender();
     }
 
     /**
@@ -135,7 +153,7 @@ export class TranscriptUI {
                 speaker: null,
             });
         }
-        this._render();
+        this._scheduleRender({ immediate: true });
     }
 
     /**
@@ -145,7 +163,7 @@ export class TranscriptUI {
         this._removeListening();
         this.provisionalText = text;
         this.provisionalSpeaker = speaker || null;
-        this._render();
+        this._scheduleRender();
     }
 
     /**
@@ -154,7 +172,7 @@ export class TranscriptUI {
     clearProvisional() {
         this.provisionalText = '';
         this.provisionalSpeaker = null;
-        this._render();
+        this._scheduleRender();
     }
 
     /**
@@ -169,6 +187,13 @@ export class TranscriptUI {
      * Show placeholder state
      */
     showPlaceholder() {
+        clearTimeout(this._renderTimer);
+        if (this._renderRafId !== null) {
+            cancelAnimationFrame(this._renderRafId);
+            this._renderRafId = null;
+        }
+        this._renderScheduled = false;
+
         this.container.innerHTML = `
       <div class="transcript-placeholder">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4">
@@ -186,6 +211,12 @@ export class TranscriptUI {
         this.provisionalSpeaker = null;
         this.currentSpeaker = null;
         this.contentEl = null;
+
+        // Clear DOM tracking
+        this._segmentElements.clear();
+        this._provisionalElement = null;
+        this._lastStableHtml = '';
+        this._lastProvHtml = '';
     }
 
     /**
@@ -327,6 +358,13 @@ export class TranscriptUI {
      * Clear all
      */
     clear() {
+        clearTimeout(this._renderTimer);
+        if (this._renderRafId !== null) {
+            cancelAnimationFrame(this._renderRafId);
+            this._renderRafId = null;
+        }
+        this._renderScheduled = false;
+
         this.container.innerHTML = '';
         this.segments = [];
         this.segmentsA = [];
@@ -337,6 +375,13 @@ export class TranscriptUI {
         this.provisionalB = { text: '', speaker: null };
         this.currentSpeaker = null;
         this.contentEl = null;
+
+        // Clear DOM tracking maps
+        this._segmentElements.clear();
+        this._segmentElementsA.clear();
+        this._segmentElementsB.clear();
+        this._provisionalElement = null;
+        this._lastRenderedSpeaker = null;
     }
 
     // ─── Internal ──────────────────────────────────────────
@@ -355,6 +400,135 @@ export class TranscriptUI {
         if (indicator) indicator.remove();
     }
 
+    /**
+     * Schedule render, debouncing rapid calls to avoid DOM thrashing
+     * This is critical when translations arrive at 2-3/sec with TTS enabled
+     */
+    _scheduleRender(options = {}) {
+        const { immediate = false } = options;
+        if (immediate) {
+            clearTimeout(this._renderTimer);
+            this._renderScheduled = false;
+            if (this._renderRafId !== null) {
+                return;
+            }
+            this._renderRafId = requestAnimationFrame(() => {
+                this._renderRafId = null;
+                this._render();
+            });
+            return;
+        }
+
+        if (this._renderRafId !== null) {
+            return; // An immediate frame render is already queued
+        }
+
+        if (this._renderScheduled) {
+            return; // Already scheduled, batch with pending render
+        }
+        this._renderScheduled = true;
+        clearTimeout(this._renderTimer);
+        this._renderTimer = setTimeout(() => {
+            this._renderScheduled = false;
+            this._render();
+        }, this._renderDebounceMs);
+    }
+
+    // ─── Incremental DOM Patching Helpers ───────────────
+
+    /**
+     * Create a DOM element for a segment's translated text
+     */
+    _createSegmentElement(seg) {
+        const block = document.createElement('div');
+        block.className = 'seg-block';
+        const div = document.createElement('div');
+        div.className = 'seg-translated';
+        div.textContent = seg.translation || '';
+        block.appendChild(div);
+        return block;
+    }
+
+    /**
+     * Update existing segment element if status/text changed
+     */
+    _updateSegmentIfNeeded(seg, stored) {
+        const needsUpdate = stored.lastStatus !== seg.status || stored.lastText !== (seg.translation || seg.original);
+        if (!needsUpdate) return false;
+
+        stored.lastStatus = seg.status;
+        stored.lastText = seg.translation || seg.original;
+
+        if (seg.status === 'translated' && seg.translation) {
+            stored.el.innerHTML = `<div class="seg-translated">${this._esc(seg.translation)}</div>`;
+        } else if (seg.status === 'original' && seg.original) {
+            stored.el.innerHTML = `<div class="seg-text pending">${this._esc(seg.original)}</div>`;
+        }
+        return true;
+    }
+
+    /**
+     * Create a dual-panel segment pair (source + translation)
+     */
+    _createDualSegmentPair(seg, showSpeaker = false, speakerLabel = '') {
+        const srcDiv = document.createElement('div');
+        const tgtDiv = document.createElement('div');
+
+        if (showSpeaker && speakerLabel) {
+            const srcLabel = document.createElement('div');
+            srcLabel.className = 'speaker-label';
+            srcLabel.textContent = speakerLabel;
+            srcDiv.appendChild(srcLabel);
+
+            const tgtLabel = document.createElement('div');
+            tgtLabel.className = 'speaker-label';
+            tgtLabel.innerHTML = '&nbsp;';
+            tgtDiv.appendChild(tgtLabel);
+        }
+
+        if (seg.status === 'translated' && seg.translation) {
+            const srcText = document.createElement('div');
+            srcText.className = 'seg-text';
+            srcText.textContent = seg.original || '';
+
+            const tgtText = document.createElement('div');
+            tgtText.className = 'seg-text';
+            tgtText.textContent = seg.translation;
+
+            srcDiv.appendChild(srcText);
+            tgtDiv.appendChild(tgtText);
+        } else if (seg.status === 'original') {
+            const srcText = document.createElement('div');
+            srcText.className = 'seg-text pending';
+            srcText.textContent = seg.original;
+
+            const tgtText = document.createElement('div');
+            tgtText.className = 'seg-text pending';
+            tgtText.textContent = '...';
+
+            srcDiv.appendChild(srcText);
+            tgtDiv.appendChild(tgtText);
+        }
+
+        return { srcDiv, tgtDiv };
+    }
+
+    /**
+     * Cleanup DOM tracking for removed segments
+     */
+    _cleanupRemovedSegments(arr, tracking) {
+        const retained = new Set(arr);
+        for (const seg of tracking.keys()) {
+            if (!retained.has(seg)) {
+                const stored = tracking.get(seg);
+                if (stored.el && stored.el.parentElement) {
+                    stored.el.remove();
+                }
+                tracking.delete(seg);
+            }
+        }
+    }
+
     _render() {
         this._ensureContent();
         this._trimSegments();
@@ -367,116 +541,274 @@ export class TranscriptUI {
     }
 
     _renderSingle() {
-        let html = '';
+        // Split stable content (confirmed translations) from provisional text.
+        // This avoids rebuilding all DOM when only provisional text changes (high-frequency).
+        let stableEl = this.contentEl.querySelector(':scope > .seg-stable');
+        let provEl = this.contentEl.querySelector(':scope > .seg-provisional-wrap');
+        if (!stableEl || !provEl) {
+            // First render — build the two-div structure fresh.
+            this.contentEl.innerHTML = '<div class="seg-stable"></div><div class="seg-provisional-wrap"></div>';
+            stableEl = this.contentEl.querySelector('.seg-stable');
+            provEl = this.contentEl.querySelector('.seg-provisional-wrap');
+            this._lastStableHtml = '';
+            this._lastProvHtml = '';
+        }
+
+        // Build stable HTML from confirmed translated segments.
+        let stableHtml = '';
         let lastRenderedSpeaker = null;
+        let mergedText = '';
+
+        const appendMergedBlock = () => {
+            const text = mergedText.trim();
+            if (!text) return;
+            stableHtml += `<div class="seg-block"><div class="seg-translated">${this._esc(text)}</div></div>`;
+            mergedText = '';
+        };
 
         for (const seg of this.segments) {
             if (seg.speaker && seg.speaker !== lastRenderedSpeaker) {
-                html += `<span class="speaker-label">Speaker ${seg.speaker}:</span> `;
+                appendMergedBlock();
+                stableHtml += `<span class="speaker-label">Speaker ${seg.speaker}:</span> `;
                 lastRenderedSpeaker = seg.speaker;
             }
-
             if (seg.status === 'translated' && seg.translation) {
-                html += `<div class="seg-block">`;
-                html += `<div class="seg-translated">${this._esc(seg.translation)}</div>`;
-                html += `</div>`;
+                const t = seg.translation.trim();
+                if (!t) continue;
+                if (!mergedText) {
+                    mergedText = t;
+                } else if (/^[,.;:!?)]/.test(t)) {
+                    mergedText += t;
+                } else {
+                    mergedText += ` ${t}`;
+                }
             }
-            // Skip 'original' segments in single mode — wait for translation
+            // Skip 'original' segments — wait for translation
+        }
+        appendMergedBlock();
+
+        // Only touch stable DOM when content actually changes.
+        if (stableHtml !== this._lastStableHtml) {
+            stableEl.innerHTML = stableHtml;
+            this._lastStableHtml = stableHtml;
         }
 
+        // Build provisional HTML (high-frequency, small update).
+        let provHtml = '';
         if (this.provisionalText) {
             if (this.provisionalSpeaker && this.provisionalSpeaker !== lastRenderedSpeaker) {
-                html += `<span class="speaker-label">Speaker ${this.provisionalSpeaker}:</span> `;
+                provHtml += `<span class="speaker-label">Speaker ${this.provisionalSpeaker}:</span> `;
             }
-            html += `<div class="seg-block"><div class="seg-provisional">${this._esc(this.provisionalText)}</div></div>`;
+            provHtml += `<div class="seg-block"><div class="seg-provisional">${this._esc(this.provisionalText)}</div></div>`;
         }
 
-        this.contentEl.innerHTML = html;
+        // Only touch provisional DOM when content actually changes.
+        if (provHtml !== this._lastProvHtml) {
+            provEl.innerHTML = provHtml;
+            this._lastProvHtml = provHtml;
+        }
+
         this._smartScroll(this.container.parentElement || this.container);
     }
 
     _renderDual() {
-        // Save scroll state before re-render
-        const oldSrcPanel = this.contentEl.querySelector('.panel-source');
-        const oldTgtPanel = this.contentEl.querySelector('.panel-translation');
-        const srcScrollState = oldSrcPanel ? this._getScrollState(oldSrcPanel) : { nearBottom: true, scrollTop: 0 };
-        const tgtScrollState = oldTgtPanel ? this._getScrollState(oldTgtPanel) : { nearBottom: true, scrollTop: 0 };
+        const srcPanel = this.contentEl.querySelector('.panel-source');
+        const tgtPanel = this.contentEl.querySelector('.panel-translation');
+
+        // Initialize panels if needed
+        if (!srcPanel || !tgtPanel) {
+            this.contentEl.innerHTML = `
+                <div class="panel-source"></div>
+                <div class="panel-translation"></div>
+            `;
+        }
+
+        const srcPanel2 = this.contentEl.querySelector('.panel-source');
+        const tgtPanel2 = this.contentEl.querySelector('.panel-translation');
 
         const isDualBidir = this.segmentsA.length > 0 || this.segmentsB.length > 0
             || this.provisionalA.text || this.provisionalB.text;
 
-        let srcHtml = '';
-        let tgtHtml = '';
-
         if (isDualBidir) {
-            // Bidirectional mode: left = Stream A translations, right = Stream B translations
-            srcHtml += `<div class="panel-label stream-a-label">🔊 Stream A</div>`;
-            tgtHtml += `<div class="panel-label stream-b-label">🎤 Stream B</div>`;
+            // Bidirectional mode: incremental patching for both streams
+            this._patchDualBidirPanels(srcPanel2, tgtPanel2);
+        } else {
+            // Single-stream view: source + translation side-by-side
+            this._patchDualSinglePanels(srcPanel2, tgtPanel2);
+        }
 
-            for (const seg of this.segmentsA) {
-                if (seg.status === 'translated' && seg.translation) {
-                    srcHtml += `<div class="seg-text">${this._esc(seg.translation)}</div>`;
-                } else if (seg.status === 'original') {
-                    srcHtml += `<div class="seg-text pending">...</div>`;
-                }
-            }
-            if (this.provisionalA.text) {
-                srcHtml += `<div class="seg-text pending">${this._esc(this.provisionalA.text)}</div>`;
-            }
+        // Preserve scroll position
+        const srcScrollState = this._getScrollState(srcPanel2);
+        const tgtScrollState = this._getScrollState(tgtPanel2);
+        if (srcScrollState.nearBottom) srcPanel2.scrollTop = srcPanel2.scrollHeight;
+        if (tgtScrollState.nearBottom) tgtPanel2.scrollTop = tgtPanel2.scrollHeight;
+    }
 
-            for (const seg of this.segmentsB) {
+    /**
+     * Incrementally patch dual bidirectional panels (Stream A left, Stream B right)
+     */
+    _patchDualBidirPanels(srcPanel, tgtPanel) {
+        // Cleanup any removed segments
+        this._cleanupRemovedSegments(this.segmentsA, this._segmentElementsA);
+        this._cleanupRemovedSegments(this.segmentsB, this._segmentElementsB);
+
+        // Add label headers if needed
+        if (!srcPanel.firstChild || srcPanel.firstChild.className !== 'panel-label') {
+            srcPanel.innerHTML = '<div class="panel-label stream-a-label">🔊 Stream A</div>';
+            tgtPanel.innerHTML = '<div class="panel-label stream-b-label">🎤 Stream B</div>';
+        }
+
+        // Incrementally add/update Stream A segments
+        for (const seg of this.segmentsA) {
+            let stored = this._segmentElementsA.get(seg);
+            if (!stored) {
+                const div = document.createElement('div');
                 if (seg.status === 'translated' && seg.translation) {
-                    tgtHtml += `<div class="seg-text">${this._esc(seg.translation)}</div>`;
+                    div.className = 'seg-text';
+                    div.textContent = seg.translation;
                 } else if (seg.status === 'original') {
-                    tgtHtml += `<div class="seg-text pending">...</div>`;
+                    div.className = 'seg-text pending';
+                    div.textContent = '...';
                 }
+                srcPanel.appendChild(div);
+                stored = { el: div, lastStatus: seg.status, lastText: seg.translation };
+                this._segmentElementsA.set(seg, stored);
             }
-            if (this.provisionalB.text) {
-                tgtHtml += `<div class="seg-text pending">${this._esc(this.provisionalB.text)}</div>`;
+        }
+
+        // Incrementally add/update Stream B segments
+        for (const seg of this.segmentsB) {
+            let stored = this._segmentElementsB.get(seg);
+            if (!stored) {
+                const div = document.createElement('div');
+                if (seg.status === 'translated' && seg.translation) {
+                    div.className = 'seg-text';
+                    div.textContent = seg.translation;
+                } else if (seg.status === 'original') {
+                    div.className = 'seg-text pending';
+                    div.textContent = '...';
+                }
+                tgtPanel.appendChild(div);
+                stored = { el: div, lastStatus: seg.status, lastText: seg.translation };
+                this._segmentElementsB.set(seg, stored);
+            }
+        }
+
+        // Handle provisional text for Stream A
+        if (this.provisionalA.text) {
+            const lastChild = srcPanel.lastChild;
+            if (!lastChild || lastChild.className !== 'seg-text pending' || lastChild.textContent !== this.provisionalA.text) {
+                const div = document.createElement('div');
+                div.className = 'seg-text pending';
+                div.textContent = this.provisionalA.text;
+                srcPanel.appendChild(div);
             }
         } else {
-            // Single-stream view: left = original, right = translation
-            let lastSpeaker = null;
-            for (const seg of this.segments) {
-                let speakerHtml = '';
-                if (seg.speaker && seg.speaker !== lastSpeaker) {
-                    speakerHtml = `<div class="speaker-label">Speaker ${seg.speaker}:</div>`;
-                    lastSpeaker = seg.speaker;
-                }
-                if (seg.status === 'translated' && seg.translation) {
-                    srcHtml += speakerHtml;
-                    srcHtml += `<div class="seg-text">${this._esc(seg.original || '')}</div>`;
-                    tgtHtml += speakerHtml ? '<div class="speaker-label">&nbsp;</div>' : '';
-                    tgtHtml += `<div class="seg-text">${this._esc(seg.translation)}</div>`;
-                } else if (seg.status === 'original' && seg.original) {
-                    srcHtml += speakerHtml;
-                    srcHtml += `<div class="seg-text pending">${this._esc(seg.original)}</div>`;
-                    tgtHtml += speakerHtml ? '<div class="speaker-label">&nbsp;</div>' : '';
-                    tgtHtml += `<div class="seg-text pending">...</div>`;
-                }
-            }
-            if (this.provisionalText) {
-                srcHtml += `<div class="seg-text pending">${this._esc(this.provisionalText)}</div>`;
-                tgtHtml += `<div class="seg-text pending">...</div>`;
+            // Remove stale provisional if exists
+            const lastSrc = srcPanel.lastChild;
+            if (lastSrc && lastSrc.className === 'seg-text pending' && !this.segmentsA.includes(this._findSegmentByElement(lastSrc, this._segmentElementsA))) {
+                if (lastSrc.parentElement) lastSrc.remove();
             }
         }
 
-        this.contentEl.innerHTML = `
-            <div class="panel-source">${srcHtml}</div>
-            <div class="panel-translation">${tgtHtml}</div>
-        `;
+        // Handle provisional text for Stream B
+        if (this.provisionalB.text) {
+            const lastChild = tgtPanel.lastChild;
+            if (!lastChild || lastChild.className !== 'seg-text pending' || lastChild.textContent !== this.provisionalB.text) {
+                const div = document.createElement('div');
+                div.className = 'seg-text pending';
+                div.textContent = this.provisionalB.text;
+                tgtPanel.appendChild(div);
+            }
+        } else {
+            // Remove stale provisional if exists
+            const lastTgt = tgtPanel.lastChild;
+            if (lastTgt && lastTgt.className === 'seg-text pending' && !this.segmentsB.includes(this._findSegmentByElement(lastTgt, this._segmentElementsB))) {
+                if (lastTgt.parentElement) lastTgt.remove();
+            }
+        }
+    }
 
-        // Restore scroll: auto-scroll if was near bottom, otherwise keep position
-        const srcPanel = this.contentEl.querySelector('.panel-source');
-        const tgtPanel = this.contentEl.querySelector('.panel-translation');
-        if (srcPanel) {
-            if (srcScrollState.nearBottom) srcPanel.scrollTop = srcPanel.scrollHeight;
-            else srcPanel.scrollTop = srcScrollState.scrollTop;
+    /**
+     * Incrementally patch dual single-stream panels (source left, translation right)
+     */
+    _patchDualSinglePanels(srcPanel, tgtPanel) {
+        this._cleanupRemovedSegments(this.segments, this._segmentElements);
+
+        let lastSpeaker = null;
+        for (const seg of this.segments) {
+            let stored = this._segmentElements.get(seg);
+            if (seg.status === 'translated' && seg.translation) {
+                if (!stored) {
+                    let showSpeaker = false;
+                    let speakerLabel = '';
+                    if (seg.speaker && seg.speaker !== lastSpeaker) {
+                        showSpeaker = true;
+                        speakerLabel = `Speaker ${seg.speaker}:`;
+                        lastSpeaker = seg.speaker;
+                    }
+
+                    const { srcDiv, tgtDiv } = this._createDualSegmentPair(seg, showSpeaker, speakerLabel);
+                    srcPanel.appendChild(srcDiv);
+                    tgtPanel.appendChild(tgtDiv);
+
+                    stored = { srcEl: srcDiv, tgtEl: tgtDiv, lastStatus: seg.status, lastText: seg.translation };
+                    this._segmentElements.set(seg, stored);
+                }
+            } else if (seg.status === 'original' && seg.original) {
+                if (!stored) {
+                    let showSpeaker = false;
+                    let speakerLabel = '';
+                    if (seg.speaker && seg.speaker !== lastSpeaker) {
+                        showSpeaker = true;
+                        speakerLabel = `Speaker ${seg.speaker}:`;
+                        lastSpeaker = seg.speaker;
+                    }
+
+                    const { srcDiv, tgtDiv } = this._createDualSegmentPair(seg, showSpeaker, speakerLabel);
+                    srcPanel.appendChild(srcDiv);
+                    tgtPanel.appendChild(tgtDiv);
+
+                    stored = { srcEl: srcDiv, tgtEl: tgtDiv, lastStatus: seg.status, lastText: seg.original };
+                    this._segmentElements.set(seg, stored);
+                }
+            }
         }
-        if (tgtPanel) {
-            if (tgtScrollState.nearBottom) tgtPanel.scrollTop = tgtPanel.scrollHeight;
-            else tgtPanel.scrollTop = tgtScrollState.scrollTop;
+
+        // Handle provisional text
+        if (this.provisionalText) {
+            const srcDiv = document.createElement('div');
+            srcDiv.className = 'seg-text pending';
+            srcDiv.textContent = this.provisionalText;
+
+            const tgtDiv = document.createElement('div');
+            tgtDiv.className = 'seg-text pending';
+            tgtDiv.textContent = '...';
+
+            if (!this._provisionalElement) {
+                srcPanel.appendChild(srcDiv);
+                tgtPanel.appendChild(tgtDiv);
+                this._provisionalElement = { srcEl: srcDiv, tgtEl: tgtDiv };
+            }
+        } else {
+            if (this._provisionalElement) {
+                if (this._provisionalElement.srcEl?.parentElement) this._provisionalElement.srcEl.remove();
+                if (this._provisionalElement.tgtEl?.parentElement) this._provisionalElement.tgtEl.remove();
+                this._provisionalElement = null;
+            }
         }
+    }
+
+    /**
+     * Find segment by element ref (helper for cleanup)
+     */
+    _findSegmentByElement(el, tracking) {
+        for (const [seg, stored] of tracking.entries()) {
+            if (stored.el === el || stored.srcEl === el || stored.tgtEl === el) {
+                return seg;
+            }
+        }
+        return null;
     }
 
     _getScrollState(el) {
@@ -534,8 +866,8 @@ export class TranscriptUI {
 
     _cleanupStaleArr(arr) {
         const now = Date.now();
-        const STALE_MS = 10000;
-        const MAX_PENDING = 3;
+        const STALE_MS = 120000;
+        const MAX_PENDING = 50;
 
         // Remove originals older than STALE_MS
         const kept = arr.filter(seg =>
