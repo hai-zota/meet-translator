@@ -24,6 +24,28 @@ const DEFAULT_SETTINGS = {
   edge_tts_voice: 'vi-VN-HoaiMyNeural',
   edge_tts_speed: 50,
   tts_auto_read: true,
+  // Dual mode
+  dual_mode_enabled: false,
+  stream_a_language_source: 'auto',
+  stream_a_language_target: 'vi',
+  stream_a_tts_enabled: false,
+  stream_a_translated_volume: 1.0,
+  stream_b_language_source: 'auto',
+  stream_b_language_target: 'en',
+  stream_b_tts_enabled: true,
+  stream_b_inject_enabled: false,
+  stream_b_mix_original_enabled: false,
+  stream_b_original_volume: 1.0,
+  stream_b_translated_volume: 1.0,
+  stream_b_edge_tts_voice: 'vi-VN-HoaiMyNeural',
+  stream_b_edge_tts_speed: 50,
+  // Smart Audio Mixer & Ducking
+  mixer: {
+    enabled: true,
+    ducking_level: 0.2,
+    vad_sensitivity: 'medium',
+    detection_threshold: -40.0,
+  },
 };
 
 class SettingsManager {

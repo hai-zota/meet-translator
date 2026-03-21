@@ -30,6 +30,11 @@ sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
 
+# Audio Mixer & Analysis
+ebur128 = "0.1"  # LUFS loudness measurement (EBU R128 standard)
+ringbuf = "0.3"  # Threadsafe circular buffer for audio
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }  # ONNX Runtime for VAD
+
 # macOS: ScreenCaptureKit for system audio
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "2", features = ["macos-private-api"] }

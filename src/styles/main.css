@@ -562,6 +562,44 @@ body {
   border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+/* Panel header labels (shown in bidirectional dual mode) */
+.panel-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  opacity: 0.7;
+}
+
+.stream-a-label {
+  color: #00e5ff; /* cyan — system audio */
+}
+
+.stream-b-label {
+  color: #4ce87d; /* green — microphone */
+}
+
+/* Both panels show translations at full brightness in bidirectional mode */
+/* Bidirectional mode — both panels show stream-colored translations */
+.dual-view .panel-source .stream-a-label ~ .seg-text {
+  color: #00e5ff; /* cyan for Stream A translations (overrides dim rule) */
+}
+
+.dual-view .panel-source .stream-a-label ~ .seg-text.pending {
+  color: rgba(0, 229, 255, 0.35); /* dim pending for Stream A */
+}
+
+.dual-view .panel-translation .stream-b-label ~ .seg-text {
+  color: #4ce87d; /* green for Stream B translations */
+}
+
+.dual-view .panel-translation .stream-b-label ~ .seg-text.pending {
+  color: rgba(76, 232, 125, 0.35); /* dim pending for Stream B */
+}
+
 /* Custom scrollbar for panels */
 .dual-view .panel-source::-webkit-scrollbar,
 .dual-view .panel-translation::-webkit-scrollbar {
@@ -625,6 +663,55 @@ body {
   z-index: 10;
   opacity: 0;
   transition: opacity 0.2s;
+}
+
+.quick-locale-controls {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.quick-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.quick-select {
+  height: 26px;
+  min-width: 104px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 10px;
+  padding: 0 6px;
+  -webkit-app-region: no-drag;
+}
+
+.quick-select.quick-voice {
+  min-width: 132px;
+  max-width: 180px;
+}
+
+/* Keep collapsed language selector compact (flag only), while dropdown still contains full labels. */
+.quick-select.quick-language-select {
+  width: 44px;
+  min-width: 44px;
+  max-width: 44px;
+  padding-left: 10px;
+  text-overflow: clip;
+}
+
+.quick-select:focus {
+  outline: none;
+  border-color: rgba(99, 140, 255, 0.65);
 }
 
 #overlay-view:hover .floating-controls {

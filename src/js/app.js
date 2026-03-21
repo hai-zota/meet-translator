@@ -5,7 +5,7 @@
 
 import { settingsManager } from './settings.js';
 import { TranscriptUI } from './ui.js';
-import { sonioxClient } from './soniox.js';
+import { SonioxClient, sonioxClient } from './soniox.js';
 import { elevenLabsTTS } from './elevenlabs-tts.js';
 import { googleTTS } from './google-tts.js';
 import { edgeTTSRust } from './edge-tts.js';
@@ -19,7 +19,7 @@ class App {
     constructor() {
         this.isRunning = false;
         this.isStarting = false; // Guard against re-entry
-        this.currentSource = 'system'; // 'system' | 'microphone'
+        this.currentSource = 'system'; // 'system' | 'microphone' | 'dual'
         this.translationMode = 'soniox'; // 'soniox' | 'local'
         this.transcriptUI = null;
         this.appWindow = getCurrentWindow();
@@ -29,6 +29,52 @@ class App {
         this.ttsEnabled = false;  // TTS runtime toggle
         this.isPinned = true;     // Always-on-top state
         this.isCompact = false;   // Compact mode (hide control bar)
+        this.dualModeEnabled = false; // Dual-stream mode runtime toggle
+        this.dualConfig = {
+            streamA: {
+                sourceLanguage: 'auto',
+                targetLanguage: 'vi',
+                ttsEnabled: false,
+                translatedVolume: 1.0,
+                edgeVoice: 'vi-VN-HoaiMyNeural',
+                edgeSpeed: 20,
+                googleVoice: 'vi-VN-Chirp3-HD-Aoede',
+                elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
+            },
+            streamB: {
+                sourceLanguage: 'auto',
+                targetLanguage: 'en',
+                ttsEnabled: true,
+                injectEnabled: false,
+                mixOriginalEnabled: false,
+                originalVolume: 0.5,
+                translatedVolume: 1.0,
+                edgeVoice: 'vi-VN-HoaiMyNeural',
+                edgeSpeed: 50,
+                googleVoice: 'vi-VN-Chirp3-HD-Aoede',
+                elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
+            },
+        };
+        // Soniox clients for dual mode (instantiated during _startDualCapture)
+        this.sonioxClientA = null;
+        this.sonioxClientB = null;
+        // Tauri channels for dual mode (kept to avoid GC drop)
+        this._dualChannelA = null;
+        this._dualChannelB = null;
+        this.injectDeviceName = 'BlackHole 2ch';
+        this._lastInjectErrorTs = 0;
+        this._injectFailureCount = 0;
+        this._injectUsedLegacyFallback = false;
+        this._injectTextQueue = [];
+        this._isInjectingText = false;
+        this._originalInjectQueue = [];
+        this._translatedInjectQueue = [];
+        this._isPumpRunning = false;
+        this._runId = 0; // Incremented on each start/stop to invalidate stale callbacks
+        this._dualStreamStates = { A: 'idle', B: 'idle' };
+        this._dualStreamErrorHistory = { A: [], B: [] };
+        this._lastStreamErrorToastTs = { A: 0, B: 0 };
+        this._mixerStatsPollTimer = null;
     }
 
     async init() {
@@ -44,6 +90,8 @@ class App {
 
         // Apply saved settings to UI
         this._applySettings(settingsManager.get());
+        this._syncQuickLocaleControls(settingsManager.get());
+        this._setMixerStatsVisibility(false);
 
         // Bind event listeners
         this._bindEvents();
@@ -59,8 +107,10 @@ class App {
 
         // Wire TTS audio callbacks for providers that use audioPlayer
         for (const tts of [elevenLabsTTS, edgeTTSRust, googleTTS]) {
-            tts.onAudioChunk = (base64Audio, isFinal) => {
-                audioPlayer.enqueue(base64Audio);
+            tts.onAudioChunk = (base64Audio, isFinal, meta) => {
+                this._handleTtsAudioChunk(base64Audio, meta).catch((err) => {
+                    console.error('[TTS] Failed to route audio chunk:', err);
+                });
             };
         }
         for (const tts of [elevenLabsTTS, edgeTTSRust, googleTTS]) {
@@ -153,6 +203,12 @@ class App {
         // Font size quick controls
         document.getElementById('btn-font-up').addEventListener('click', () => this._adjustFontSize(4));
         document.getElementById('btn-font-down').addEventListener('click', () => this._adjustFontSize(-4));
+        document.getElementById('btn-center-window')?.addEventListener('click', () => {
+            this._centerWindow();
+        });
+
+        // Footer quick locale/voice controls
+        this._bindQuickLocaleControls();
 
         // Color dot controls
         document.querySelectorAll('.color-dot').forEach(dot => {
@@ -311,6 +367,32 @@ class App {
             if (detail) detail.style.display = e.target.checked ? '' : 'none';
         });
 
+        // Dual mode checkbox — show/hide stream config and sync source radio
+        document.getElementById('check-dual-mode')?.addEventListener('change', (e) => {
+            const config = document.getElementById('dual-mode-config');
+            if (config) config.style.display = e.target.checked ? '' : 'none';
+
+            const dualRadio = document.querySelector('input[name="audio-source"][value="dual"]');
+            const systemRadio = document.querySelector('input[name="audio-source"][value="system"]');
+            if (e.target.checked) {
+                if (dualRadio) dualRadio.checked = true;
+            } else if (dualRadio?.checked && systemRadio) {
+                systemRadio.checked = true;
+            }
+        });
+
+        // Audio source radio — keep dual checkbox synced
+        document.querySelectorAll('input[name="audio-source"]').forEach((radio) => {
+            radio.addEventListener('change', () => {
+                const selected = document.querySelector('input[name="audio-source"]:checked')?.value || 'system';
+                const checkDual = document.getElementById('check-dual-mode');
+                const dualConfig = document.getElementById('dual-mode-config');
+                const isDual = selected === 'dual';
+                if (checkDual) checkDual.checked = isDual;
+                if (dualConfig) dualConfig.style.display = isDual ? '' : 'none';
+            });
+        });
+
         // TTS provider toggle — show/hide relevant settings panels
         document.getElementById('select-tts-provider')?.addEventListener('change', (e) => {
             this._updateTTSProviderUI(e.target.value);
@@ -329,9 +411,48 @@ class App {
             if (label) label.textContent = (v >= 0 ? '+' : '') + v + '%';
         });
 
+        // Stream B inject voice speed slider
+        document.getElementById('range-stream-b-edge-speed')?.addEventListener('input', (e) => {
+            const label = document.getElementById('stream-b-edge-speed-value');
+            const v = parseInt(e.target.value);
+            if (label) label.textContent = (v >= 0 ? '+' : '') + v + '%';
+        });
+
+        // Stream A TTS voice speed slider
+        document.getElementById('range-stream-a-edge-speed')?.addEventListener('input', (e) => {
+            const label = document.getElementById('stream-a-edge-speed-value');
+            const v = parseInt(e.target.value);
+            if (label) label.textContent = (v >= 0 ? '+' : '') + v + '%';
+        });
+
+        document.getElementById('range-stream-a-translated-volume')?.addEventListener('input', (e) => {
+            const label = document.getElementById('stream-a-translated-volume-value');
+            const v = parseInt(e.target.value, 10);
+            if (label) label.textContent = `${v}%`;
+        });
+
+        document.getElementById('range-stream-b-original-volume')?.addEventListener('input', (e) => {
+            const label = document.getElementById('stream-b-original-volume-value');
+            const v = parseInt(e.target.value, 10);
+            if (label) label.textContent = `${v}%`;
+        });
+
+        document.getElementById('range-stream-b-translated-volume')?.addEventListener('input', (e) => {
+            const label = document.getElementById('stream-b-translated-volume-value');
+            const v = parseInt(e.target.value, 10);
+            if (label) label.textContent = `${v}%`;
+        });
+
         document.getElementById('range-google-speed')?.addEventListener('input', (e) => {
             const label = document.getElementById('google-speed-value');
             if (label) label.textContent = parseFloat(e.target.value).toFixed(1) + 'x';
+        });
+
+
+        // Ducking level slider
+        document.getElementById('range-ducking-level')?.addEventListener('input', (e) => {
+            const label = document.getElementById('ducking-level-value');
+            if (label) label.textContent = `${e.target.value}%`;
         });
 
         // Add translation term row
@@ -342,6 +463,11 @@ class App {
         // TTS toggle button in overlay
         document.getElementById('btn-tts').addEventListener('click', () => {
             this._toggleTTS();
+        });
+
+        // Dual Mode toggle button in overlay
+        document.getElementById('btn-dual-mode').addEventListener('click', () => {
+            this._toggleDualMode();
         });
 
         // Wire Soniox callbacks
@@ -373,6 +499,392 @@ class App {
 
     _bindSettingsForm() {
         // These are handled in _populateSettingsForm and _saveSettingsFromForm
+    }
+
+    _bindQuickLocaleControls() {
+        const quickMyLang = document.getElementById('quick-my-language');
+        const quickMyVoice = document.getElementById('quick-my-voice');
+        const quickMeetingLang = document.getElementById('quick-meeting-language');
+        const quickMeetingVoice = document.getElementById('quick-meeting-voice');
+
+        if (quickMyLang) {
+            quickMyLang.addEventListener('change', async (e) => {
+                try {
+                    const settings = settingsManager.get();
+                    const value = e.target.value;
+                    if (this.currentSource === 'dual') {
+                        settings.stream_a_language_target = value;
+                    } else {
+                        settings.target_language = value;
+                    }
+                    await settingsManager.save(settings);
+                    await this._applyQuickRealtimeChanges({
+                        languageChanged: true,
+                        voiceChanged: false,
+                        stream: this.currentSource === 'dual' ? 'A' : 'single',
+                    });
+                } catch (err) {
+                    console.error('[QuickControls] Failed to save My Language:', err);
+                }
+            });
+        }
+
+        if (quickMyVoice) {
+            quickMyVoice.addEventListener('change', async (e) => {
+                try {
+                    const settings = settingsManager.get();
+                    this._setQuickVoiceInSettings(settings, this.currentSource === 'dual' ? 'A' : 'single', e.target.value);
+                    await settingsManager.save(settings);
+                    await this._applyQuickRealtimeChanges({
+                        languageChanged: false,
+                        voiceChanged: true,
+                        stream: this.currentSource === 'dual' ? 'A' : 'single',
+                    });
+                } catch (err) {
+                    console.error('[QuickControls] Failed to save My Voice:', err);
+                }
+            });
+        }
+
+        if (quickMeetingLang) {
+            quickMeetingLang.addEventListener('change', async (e) => {
+                try {
+                    const settings = settingsManager.get();
+                    settings.stream_b_language_target = e.target.value;
+                    await settingsManager.save(settings);
+                    await this._applyQuickRealtimeChanges({
+                        languageChanged: true,
+                        voiceChanged: false,
+                        stream: 'B',
+                    });
+                } catch (err) {
+                    console.error('[QuickControls] Failed to save Meeting Language:', err);
+                }
+            });
+        }
+
+        if (quickMeetingVoice) {
+            quickMeetingVoice.addEventListener('change', async (e) => {
+                try {
+                    const settings = settingsManager.get();
+                    this._setQuickVoiceInSettings(settings, 'B', e.target.value);
+                    await settingsManager.save(settings);
+                    await this._applyQuickRealtimeChanges({
+                        languageChanged: false,
+                        voiceChanged: true,
+                        stream: 'B',
+                    });
+                } catch (err) {
+                    console.error('[QuickControls] Failed to save Meeting Voice:', err);
+                }
+            });
+        }
+
+        this._syncQuickLocaleControls(settingsManager.get());
+    }
+
+    _setOptionsFromSource(targetSelect, sourceSelect) {
+        if (!targetSelect || !sourceSelect) return;
+        targetSelect.innerHTML = sourceSelect.innerHTML;
+    }
+
+    _languageFlag(langCode) {
+        const map = {
+            auto: '🌐',
+            vi: '🇻🇳',
+            en: '🇺🇸',
+            ja: '🇯🇵',
+            ko: '🇰🇷',
+            zh: '🇨🇳',
+            fr: '🇫🇷',
+            de: '🇩🇪',
+            es: '🇪🇸',
+            th: '🇹🇭',
+            id: '🇮🇩',
+        };
+        return map[langCode] || '🌐';
+    }
+
+    _decorateQuickLanguageOptions(selectEl) {
+        if (!selectEl) return;
+        Array.from(selectEl.options).forEach((opt) => {
+            const flag = this._languageFlag(opt.value);
+            const name = (opt.dataset.langName || opt.textContent || '').replace(/^\S+\s+/, '');
+            if (!opt.dataset.langName) {
+                opt.dataset.langName = name || opt.textContent || '';
+            }
+            opt.textContent = `${flag} ${opt.dataset.langName}`;
+        });
+    }
+
+    _renderQuickLanguageCollapsed(selectEl) {
+        if (!selectEl) return;
+        const selected = selectEl.options[selectEl.selectedIndex];
+        if (!selected) return;
+        const flag = this._languageFlag(selected.value);
+        // Native select shows selected option text in collapsed state.
+        // Keep only flag for selected option; restore full labels on open.
+        Array.from(selectEl.options).forEach((opt) => {
+            const baseName = opt.dataset.langName || opt.textContent;
+            opt.textContent = `${this._languageFlag(opt.value)} ${baseName}`;
+        });
+        selected.textContent = flag;
+    }
+
+    _bindQuickLanguageSelectBehavior(selectEl) {
+        if (!selectEl || selectEl.dataset.boundQuickLang === '1') return;
+        selectEl.dataset.boundQuickLang = '1';
+
+        const restoreLabels = () => {
+            this._decorateQuickLanguageOptions(selectEl);
+        };
+        const collapseToFlag = () => {
+            this._renderQuickLanguageCollapsed(selectEl);
+        };
+
+        selectEl.addEventListener('mousedown', restoreLabels);
+        selectEl.addEventListener('focus', restoreLabels);
+        selectEl.addEventListener('change', collapseToFlag);
+        selectEl.addEventListener('blur', collapseToFlag);
+    }
+
+    _setQuickVoiceInSettings(settings, stream, voiceValue) {
+        const provider = settings.tts_provider || 'edge';
+        if (provider === 'google') {
+            if (stream === 'A') settings.stream_a_google_tts_voice = voiceValue;
+            else if (stream === 'B') settings.stream_b_google_tts_voice = voiceValue;
+            else settings.google_tts_voice = voiceValue;
+        } else if (provider === 'elevenlabs') {
+            if (stream === 'A') settings.stream_a_elevenlabs_voice_id = voiceValue;
+            else if (stream === 'B') settings.stream_b_elevenlabs_voice_id = voiceValue;
+            else settings.tts_voice_id = voiceValue;
+        } else {
+            if (stream === 'A') settings.stream_a_edge_tts_voice = voiceValue;
+            else if (stream === 'B') settings.stream_b_edge_tts_voice = voiceValue;
+            else settings.edge_tts_voice = voiceValue;
+        }
+    }
+
+    _getQuickVoiceFromSettings(settings, stream) {
+        const provider = settings.tts_provider || 'edge';
+        if (provider === 'google') {
+            if (stream === 'A') return settings.stream_a_google_tts_voice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+            if (stream === 'B') return settings.stream_b_google_tts_voice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+            return settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+        }
+        if (provider === 'elevenlabs') {
+            if (stream === 'A') return settings.stream_a_elevenlabs_voice_id || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
+            if (stream === 'B') return settings.stream_b_elevenlabs_voice_id || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
+            return settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
+        }
+        if (stream === 'A') return settings.stream_a_edge_tts_voice || settings.edge_tts_voice || 'vi-VN-HoaiMyNeural';
+        if (stream === 'B') return settings.stream_b_edge_tts_voice || settings.edge_tts_voice || 'vi-VN-HoaiMyNeural';
+        return settings.edge_tts_voice || 'vi-VN-HoaiMyNeural';
+    }
+
+    _syncQuickLocaleControls(settings) {
+        const quickMyLang = document.getElementById('quick-my-language');
+        const quickMyVoice = document.getElementById('quick-my-voice');
+        const quickMeetingLang = document.getElementById('quick-meeting-language');
+        const quickMeetingVoice = document.getElementById('quick-meeting-voice');
+        const quickMeetingRow = document.getElementById('quick-meeting-row');
+
+        const sourceTarget = document.getElementById('select-target-lang');
+        const streamATarget = document.getElementById('select-stream-a-target');
+        const streamBTarget = document.getElementById('select-stream-b-target');
+
+        const provider = settings.tts_provider || 'edge';
+        const voiceSource = provider === 'google'
+            ? document.getElementById('select-google-voice')
+            : (provider === 'elevenlabs'
+                ? document.getElementById('select-tts-voice')
+                : document.getElementById('select-edge-voice'));
+
+        if (quickMyLang) {
+            this._setOptionsFromSource(quickMyLang, this.currentSource === 'dual' ? streamATarget : sourceTarget);
+            this._decorateQuickLanguageOptions(quickMyLang);
+            this._bindQuickLanguageSelectBehavior(quickMyLang);
+            quickMyLang.value = this.currentSource === 'dual'
+                ? (settings.stream_a_language_target || 'vi')
+                : (settings.target_language || 'vi');
+            this._renderQuickLanguageCollapsed(quickMyLang);
+        }
+
+        if (quickMyVoice) {
+            this._setOptionsFromSource(quickMyVoice, voiceSource);
+            quickMyVoice.value = this._getQuickVoiceFromSettings(settings, this.currentSource === 'dual' ? 'A' : 'single');
+        }
+
+        if (quickMeetingRow) quickMeetingRow.style.display = this.currentSource === 'dual' ? '' : 'none';
+
+        if (this.currentSource === 'dual') {
+            if (quickMeetingLang) {
+                this._setOptionsFromSource(quickMeetingLang, streamBTarget);
+                this._decorateQuickLanguageOptions(quickMeetingLang);
+                this._bindQuickLanguageSelectBehavior(quickMeetingLang);
+                quickMeetingLang.value = settings.stream_b_language_target || 'en';
+                this._renderQuickLanguageCollapsed(quickMeetingLang);
+            }
+            if (quickMeetingVoice) {
+                this._setOptionsFromSource(quickMeetingVoice, voiceSource);
+                quickMeetingVoice.value = this._getQuickVoiceFromSettings(settings, 'B');
+            }
+        }
+    }
+
+    async _applyQuickRealtimeChanges({ languageChanged = false, voiceChanged = false, stream = 'single' } = {}) {
+        const settings = settingsManager.get();
+
+        if (voiceChanged && this.ttsEnabled) {
+            const tts = this._getActiveTTS();
+            const routeStream = (stream === 'A' || stream === 'B') ? stream : null;
+            this._configureTTS(tts, settings, routeStream);
+
+            // ElevenLabs voice is part of WS URL; reconnect to apply immediately.
+            if ((settings.tts_provider || 'edge') === 'elevenlabs') {
+                tts.disconnect?.();
+                tts.connect?.();
+            }
+        }
+
+        if (!languageChanged || !this.isRunning || this.translationMode === 'local') {
+            return;
+        }
+
+        if (this.currentSource === 'dual') {
+            if ((stream === 'A' || stream === 'single') && this.sonioxClientA) {
+                this.sonioxClientA.connect({
+                    apiKey: settings.soniox_api_key,
+                    sourceLanguage: this.dualConfig.streamA.sourceLanguage,
+                    targetLanguage: this.dualConfig.streamA.targetLanguage,
+                    customContext: settings.custom_context,
+                });
+            }
+            if ((stream === 'B' || stream === 'single') && this.sonioxClientB) {
+                this.sonioxClientB.connect({
+                    apiKey: settings.soniox_api_key,
+                    sourceLanguage: this.dualConfig.streamB.sourceLanguage,
+                    targetLanguage: this.dualConfig.streamB.targetLanguage,
+                    customContext: settings.custom_context,
+                });
+            }
+            this._showToast('Updated translation language in realtime', 'info');
+            return;
+        }
+
+        sonioxClient.connect({
+            apiKey: settings.soniox_api_key,
+            sourceLanguage: settings.source_language,
+            targetLanguage: settings.target_language,
+            customContext: settings.custom_context,
+        });
+        this._showToast('Updated translation language in realtime', 'info');
+    }
+
+    async _applySettingsRealtimeAfterSave(prev, next) {
+        if (!this.isRunning) return;
+
+        const prevSource = prev.audio_source === 'both' ? 'dual' : (prev.audio_source || 'system');
+        const nextSource = next.audio_source === 'both' ? 'dual' : (next.audio_source || 'system');
+        const modeChanged = (prev.translation_mode || 'soniox') !== (next.translation_mode || 'soniox');
+        const sourceChanged = prevSource !== nextSource;
+
+        // Capture mode/source change requires full restart to switch pipelines safely.
+        if (modeChanged || sourceChanged) {
+            this.currentSource = nextSource;
+            this.dualModeEnabled = nextSource === 'dual';
+            this.transcriptUI.configure({ viewMode: nextSource === 'dual' ? 'dual' : 'single' });
+            document.getElementById('btn-view-mode')?.classList.toggle('active', nextSource === 'dual');
+            this._updateSourceButtons();
+
+            await this.stop();
+            await this.start();
+            return;
+        }
+
+        const contextChanged = JSON.stringify(prev.custom_context || null) !== JSON.stringify(next.custom_context || null);
+        const singleLangChanged =
+            prev.source_language !== next.source_language ||
+            prev.target_language !== next.target_language;
+        const dualLangAChanged =
+            prev.stream_a_language_source !== next.stream_a_language_source ||
+            prev.stream_a_language_target !== next.stream_a_language_target;
+        const dualLangBChanged =
+            prev.stream_b_language_source !== next.stream_b_language_source ||
+            prev.stream_b_language_target !== next.stream_b_language_target;
+
+        // Reconnect Soniox stream(s) immediately when language/context changes.
+        if ((next.translation_mode || 'soniox') !== 'local') {
+            if (nextSource === 'dual') {
+                if ((dualLangAChanged || contextChanged) && this.sonioxClientA) {
+                    this.sonioxClientA.connect({
+                        apiKey: next.soniox_api_key,
+                        sourceLanguage: next.stream_a_language_source || 'auto',
+                        targetLanguage: next.stream_a_language_target || 'vi',
+                        customContext: next.custom_context,
+                    });
+                }
+                if ((dualLangBChanged || contextChanged) && this.sonioxClientB) {
+                    this.sonioxClientB.connect({
+                        apiKey: next.soniox_api_key,
+                        sourceLanguage: next.stream_b_language_source || 'auto',
+                        targetLanguage: next.stream_b_language_target || 'en',
+                        customContext: next.custom_context,
+                    });
+                }
+            } else if (singleLangChanged || contextChanged) {
+                sonioxClient.connect({
+                    apiKey: next.soniox_api_key,
+                    sourceLanguage: next.source_language || 'auto',
+                    targetLanguage: next.target_language || 'vi',
+                    customContext: next.custom_context,
+                });
+            }
+        }
+
+        const ttsChanged =
+            prev.tts_provider !== next.tts_provider ||
+            prev.edge_tts_voice !== next.edge_tts_voice ||
+            prev.edge_tts_speed !== next.edge_tts_speed ||
+            prev.google_tts_voice !== next.google_tts_voice ||
+            prev.google_tts_speed !== next.google_tts_speed ||
+            prev.tts_voice_id !== next.tts_voice_id ||
+            prev.elevenlabs_api_key !== next.elevenlabs_api_key ||
+            prev.google_tts_api_key !== next.google_tts_api_key ||
+            prev.stream_a_edge_tts_voice !== next.stream_a_edge_tts_voice ||
+            prev.stream_a_edge_tts_speed !== next.stream_a_edge_tts_speed ||
+            prev.stream_a_google_tts_voice !== next.stream_a_google_tts_voice ||
+            prev.stream_a_elevenlabs_voice_id !== next.stream_a_elevenlabs_voice_id ||
+            prev.stream_b_edge_tts_voice !== next.stream_b_edge_tts_voice ||
+            prev.stream_b_edge_tts_speed !== next.stream_b_edge_tts_speed ||
+            prev.stream_b_google_tts_voice !== next.stream_b_google_tts_voice ||
+            prev.stream_b_elevenlabs_voice_id !== next.stream_b_elevenlabs_voice_id;
+
+        // Apply TTS provider/voice changes immediately for ongoing narration.
+        if (ttsChanged && this.ttsEnabled) {
+            elevenLabsTTS.disconnect();
+            edgeTTSRust.disconnect();
+            googleTTS.disconnect();
+
+            const tts = this._getActiveTTS();
+            this._configureTTS(tts, next, nextSource === 'dual' ? 'A' : null);
+            tts.connect?.();
+            audioPlayer.resume();
+        }
+
+        // Apply mixer settings changes immediately
+        const mixerChanged = JSON.stringify(prev.mixer) !== JSON.stringify(next.mixer);
+        if (mixerChanged && next.mixer) {
+            try {
+                await invoke('mixer_update_settings', {
+                    enabled: next.mixer.enabled !== false,
+                    duckingLevel: next.mixer.ducking_level ?? 0.2,
+                    vadSensitivity: next.mixer.vad_sensitivity || 'medium',
+                });
+            } catch (e) {
+                console.warn('[Mixer] Failed to update settings:', e);
+            }
+        }
     }
 
     // ─── Keyboard Shortcuts ─────────────────────────────────
@@ -459,6 +971,12 @@ class App {
                 e.preventDefault();
                 this._toggleCompact();
             }
+
+            // Cmd/Ctrl + B: Switch to Dual Conversation mode
+            if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
+                e.preventDefault();
+                this._setSource('dual');
+            }
         });
     }
 
@@ -485,7 +1003,7 @@ class App {
         this._updateModeUI(s.translation_mode || 'soniox');
 
         // Audio source radio
-        const radioValue = s.audio_source || 'system';
+        const radioValue = s.audio_source === 'both' ? 'dual' : (s.audio_source || 'system');
         const radio = document.querySelector(`input[name="audio-source"][value="${radioValue}"]`);
         if (radio) radio.checked = true;
 
@@ -542,9 +1060,96 @@ class App {
             providerSelect.value = s.tts_provider || 'edge';
             this._updateTTSProviderUI(providerSelect.value);
         }
+
+        // Dual mode settings
+        const checkDual = document.getElementById('check-dual-mode');
+        if (checkDual) {
+            checkDual.checked = radioValue === 'dual' || s.dual_mode_enabled || false;
+            const config = document.getElementById('dual-mode-config');
+            if (config) config.style.display = checkDual.checked ? '' : 'none';
+        }
+        const selStreamASrc = document.getElementById('select-stream-a-source');
+        if (selStreamASrc) selStreamASrc.value = s.stream_a_language_source || 'auto';
+        const selStreamATgt = document.getElementById('select-stream-a-target');
+        if (selStreamATgt) selStreamATgt.value = s.stream_a_language_target || 'vi';
+        const checkStreamATts = document.getElementById('check-stream-a-tts');
+        if (checkStreamATts) checkStreamATts.checked = s.stream_a_tts_enabled || false;
+        const streamATranslatedVolume = Number.isFinite(s.stream_a_translated_volume)
+            ? s.stream_a_translated_volume
+            : 1.0;
+        const streamAVolumeSlider = document.getElementById('range-stream-a-translated-volume');
+        const streamAVolumeLabel = document.getElementById('stream-a-translated-volume-value');
+        if (streamAVolumeSlider) streamAVolumeSlider.value = Math.round(streamATranslatedVolume * 100);
+        if (streamAVolumeLabel) streamAVolumeLabel.textContent = `${Math.round(streamATranslatedVolume * 100)}%`;
+        const selStreamBSrc = document.getElementById('select-stream-b-source');
+        if (selStreamBSrc) selStreamBSrc.value = s.stream_b_language_source || 'auto';
+        const selStreamBTgt = document.getElementById('select-stream-b-target');
+        if (selStreamBTgt) selStreamBTgt.value = s.stream_b_language_target || 'en';
+        const checkStreamBTts = document.getElementById('check-stream-b-tts');
+        if (checkStreamBTts) checkStreamBTts.checked = s.stream_b_tts_enabled !== false;
+        const checkStreamBInject = document.getElementById('check-stream-b-inject');
+        if (checkStreamBInject) checkStreamBInject.checked = s.stream_b_inject_enabled || false;
+        const checkStreamBMixOriginal = document.getElementById('check-stream-b-mix-original');
+        if (checkStreamBMixOriginal) checkStreamBMixOriginal.checked = s.stream_b_mix_original_enabled || false;
+        const streamBOriginalVolume = Number.isFinite(s.stream_b_original_volume)
+            ? s.stream_b_original_volume
+            : 0.5;
+        const streamBOriginalSlider = document.getElementById('range-stream-b-original-volume');
+        const streamBOriginalLabel = document.getElementById('stream-b-original-volume-value');
+        if (streamBOriginalSlider) streamBOriginalSlider.value = Math.round(streamBOriginalVolume * 100);
+        if (streamBOriginalLabel) streamBOriginalLabel.textContent = `${Math.round(streamBOriginalVolume * 100)}%`;
+        const streamBTranslatedVolume = Number.isFinite(s.stream_b_translated_volume)
+            ? s.stream_b_translated_volume
+            : 1.0;
+        const streamBTranslatedSlider = document.getElementById('range-stream-b-translated-volume');
+        const streamBTranslatedLabel = document.getElementById('stream-b-translated-volume-value');
+        if (streamBTranslatedSlider) streamBTranslatedSlider.value = Math.round(streamBTranslatedVolume * 100);
+        if (streamBTranslatedLabel) streamBTranslatedLabel.textContent = `${Math.round(streamBTranslatedVolume * 100)}%`;
+        const streamBVoice = document.getElementById('select-stream-b-edge-voice');
+        if (streamBVoice) streamBVoice.value = s.stream_b_edge_tts_voice || s.edge_tts_voice || 'vi-VN-HoaiMyNeural';
+        const streamBSpeedSlider = document.getElementById('range-stream-b-edge-speed');
+        const streamBSpeedLabel = document.getElementById('stream-b-edge-speed-value');
+        const streamBSpeed = s.stream_b_edge_tts_speed !== undefined
+            ? s.stream_b_edge_tts_speed
+            : (s.edge_tts_speed !== undefined ? s.edge_tts_speed : 20);
+        if (streamBSpeedSlider) streamBSpeedSlider.value = streamBSpeed;
+        if (streamBSpeedLabel) streamBSpeedLabel.textContent = (streamBSpeed >= 0 ? '+' : '') + streamBSpeed + '%';
+
+        // Stream A per-provider voices
+        const streamAEdgeVoice = document.getElementById('select-stream-a-edge-voice');
+        if (streamAEdgeVoice) streamAEdgeVoice.value = s.stream_a_edge_tts_voice || s.edge_tts_voice || 'vi-VN-HoaiMyNeural';
+        const streamASpeedSlider = document.getElementById('range-stream-a-edge-speed');
+        const streamASpeedLabel = document.getElementById('stream-a-edge-speed-value');
+        const streamASpeed = s.stream_a_edge_tts_speed !== undefined
+            ? s.stream_a_edge_tts_speed
+            : (s.edge_tts_speed !== undefined ? s.edge_tts_speed : 20);
+        if (streamASpeedSlider) streamASpeedSlider.value = streamASpeed;
+        if (streamASpeedLabel) streamASpeedLabel.textContent = (streamASpeed >= 0 ? '+' : '') + streamASpeed + '%';
+        const streamAGoogleVoice = document.getElementById('select-stream-a-google-voice');
+        if (streamAGoogleVoice) streamAGoogleVoice.value = s.stream_a_google_tts_voice || s.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+        const streamAElevenLabsVoice = document.getElementById('select-stream-a-elevenlabs-voice');
+        if (streamAElevenLabsVoice) streamAElevenLabsVoice.value = s.stream_a_elevenlabs_voice_id || s.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
+
+        // Stream B additional voices (google + elevenlabs)
+        const streamBGoogleVoice = document.getElementById('select-stream-b-google-voice');
+        if (streamBGoogleVoice) streamBGoogleVoice.value = s.stream_b_google_tts_voice || s.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+        const streamBElevenLabsVoice = document.getElementById('select-stream-b-elevenlabs-voice');
+        if (streamBElevenLabsVoice) streamBElevenLabsVoice.value = s.stream_b_elevenlabs_voice_id || s.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
+        // Mixer settings
+        const mixerCfg = s.mixer || {};
+        const mixerEnabled = document.getElementById('check-mixer-enabled');
+        if (mixerEnabled) mixerEnabled.checked = mixerCfg.enabled !== false;
+        const duckingSlider = document.getElementById('range-ducking-level');
+        const duckingLabel = document.getElementById('ducking-level-value');
+        const duckingPct = Math.round((mixerCfg.ducking_level ?? 0.2) * 100);
+        if (duckingSlider) duckingSlider.value = duckingPct;
+        if (duckingLabel) duckingLabel.textContent = `${duckingPct}%`;
+        const vadSelect = document.getElementById('select-vad-sensitivity');
+        if (vadSelect) vadSelect.value = mixerCfg.vad_sensitivity || 'medium';
     }
 
     async _saveSettingsFromForm() {
+        const prevSettings = settingsManager.get();
         const settings = {
             soniox_api_key: document.getElementById('input-api-key').value.trim(),
             source_language: document.getElementById('select-source-lang').value,
@@ -586,8 +1191,73 @@ class App {
         settings.google_tts_speed = parseFloat(document.getElementById('range-google-speed')?.value || 1.0);
         settings.tts_enabled = false;
 
+        // Dual mode settings
+        settings.audio_source = settings.audio_source === 'both' ? 'dual' : settings.audio_source;
+        settings.dual_mode_enabled = settings.audio_source === 'dual';
+        settings.stream_a_language_source = document.getElementById('select-stream-a-source')?.value || 'auto';
+        settings.stream_a_language_target = document.getElementById('select-stream-a-target')?.value || 'vi';
+        settings.stream_a_tts_enabled = document.getElementById('check-stream-a-tts')?.checked || false;
+        settings.stream_a_translated_volume = parseInt(
+            document.getElementById('range-stream-a-translated-volume')?.value || 100,
+            10
+        ) / 100;
+        settings.stream_b_language_source = document.getElementById('select-stream-b-source')?.value || 'auto';
+        settings.stream_b_language_target = document.getElementById('select-stream-b-target')?.value || 'en';
+        settings.stream_b_tts_enabled = document.getElementById('check-stream-b-tts')?.checked !== false;
+        settings.stream_b_inject_enabled = document.getElementById('check-stream-b-inject')?.checked || false;
+        settings.stream_b_mix_original_enabled = document.getElementById('check-stream-b-mix-original')?.checked || false;
+        settings.stream_b_original_volume = parseInt(
+            document.getElementById('range-stream-b-original-volume')?.value || 100,
+            10
+        ) / 100;
+        settings.stream_b_translated_volume = parseInt(
+            document.getElementById('range-stream-b-translated-volume')?.value || 100,
+            10
+        ) / 100;
+        settings.stream_b_edge_tts_voice = document.getElementById('select-stream-b-edge-voice')?.value
+            || settings.edge_tts_voice
+            || 'vi-VN-HoaiMyNeural';
+        settings.stream_b_edge_tts_speed = parseInt(
+            document.getElementById('range-stream-b-edge-speed')?.value
+            || settings.edge_tts_speed
+            || 20
+        );
+        settings.stream_a_edge_tts_voice = document.getElementById('select-stream-a-edge-voice')?.value
+            || settings.edge_tts_voice
+            || 'vi-VN-HoaiMyNeural';
+        settings.stream_a_edge_tts_speed = parseInt(
+            document.getElementById('range-stream-a-edge-speed')?.value
+            ?? settings.edge_tts_speed
+            ?? 20
+        );
+        settings.stream_a_google_tts_voice = document.getElementById('select-stream-a-google-voice')?.value
+            || settings.google_tts_voice
+            || 'vi-VN-Chirp3-HD-Aoede';
+        settings.stream_a_elevenlabs_voice_id = document.getElementById('select-stream-a-elevenlabs-voice')?.value
+            || settings.tts_voice_id
+            || '21m00Tcm4TlvDq8ikWAM';
+        settings.stream_b_google_tts_voice = document.getElementById('select-stream-b-google-voice')?.value
+            || settings.google_tts_voice
+            || 'vi-VN-Chirp3-HD-Aoede';
+        settings.stream_b_elevenlabs_voice_id = document.getElementById('select-stream-b-elevenlabs-voice')?.value
+            || settings.tts_voice_id
+            || '21m00Tcm4TlvDq8ikWAM';
+
+
+        // Mixer settings
+        const duckingPctVal = parseInt(document.getElementById('range-ducking-level')?.value ?? 20);
+        settings.mixer = {
+            enabled: document.getElementById('check-mixer-enabled')?.checked !== false,
+            ducking_level: duckingPctVal / 100,
+            vad_sensitivity: document.getElementById('select-vad-sensitivity')?.value || 'medium',
+            detection_threshold: (prevSettings.mixer || {}).detection_threshold ?? -40.0,
+        };
+
+        const nextSettings = { ...prevSettings, ...settings };
+
         try {
             await settingsManager.save(settings);
+            await this._applySettingsRealtimeAfterSave(prevSettings, nextSettings);
             this._showToast('Settings saved', 'success');
             this._showView('overlay');
         } catch (err) {
@@ -612,12 +1282,102 @@ class App {
         }
 
         // Update current source button states
-        this.currentSource = settings.audio_source === 'both' ? 'system' : (settings.audio_source || 'system');
+        this.currentSource = settings.audio_source === 'both' ? 'dual' : (settings.audio_source || 'system');
         this._updateSourceButtons();
 
-        // TTS is always OFF on app start — user must toggle on each session
-        this.ttsEnabled = false;
+        // Keep runtime TTS toggle state unchanged when settings are updated.
         this._updateTTSButton();
+
+        // Sync dualConfig from persisted settings
+        this.dualConfig = {
+            streamA: {
+                sourceLanguage: settings.stream_a_language_source || 'auto',
+                targetLanguage: settings.stream_a_language_target || 'vi',
+                ttsEnabled: settings.stream_a_tts_enabled || false,
+                translatedVolume: Number.isFinite(settings.stream_a_translated_volume)
+                    ? settings.stream_a_translated_volume
+                    : 1.0,
+                edgeVoice: settings.stream_a_edge_tts_voice || settings.edge_tts_voice || 'vi-VN-HoaiMyNeural',
+                edgeSpeed: settings.stream_a_edge_tts_speed !== undefined
+                    ? settings.stream_a_edge_tts_speed
+                    : (settings.edge_tts_speed !== undefined ? settings.edge_tts_speed : 20),
+                googleVoice: settings.stream_a_google_tts_voice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede',
+                elevenLabsVoiceId: settings.stream_a_elevenlabs_voice_id || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM',
+            },
+            streamB: {
+                sourceLanguage: settings.stream_b_language_source || 'auto',
+                targetLanguage: settings.stream_b_language_target || 'en',
+                ttsEnabled: settings.stream_b_tts_enabled !== false,
+                injectEnabled: settings.stream_b_inject_enabled || false,
+                mixOriginalEnabled: settings.stream_b_mix_original_enabled || false,
+                originalVolume: Number.isFinite(settings.stream_b_original_volume)
+                    ? settings.stream_b_original_volume
+                    : 0.5,
+                translatedVolume: Number.isFinite(settings.stream_b_translated_volume)
+                    ? settings.stream_b_translated_volume
+                    : 1.0,
+                edgeVoice: settings.stream_b_edge_tts_voice || settings.edge_tts_voice || 'vi-VN-HoaiMyNeural',
+                edgeSpeed: settings.stream_b_edge_tts_speed !== undefined
+                    ? settings.stream_b_edge_tts_speed
+                    : (settings.edge_tts_speed !== undefined ? settings.edge_tts_speed : 20),
+                googleVoice: settings.stream_b_google_tts_voice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede',
+                elevenLabsVoiceId: settings.stream_b_elevenlabs_voice_id || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM',
+            },
+        };
+
+        // Dual mode button reflects saved setting
+        this.dualModeEnabled = this.currentSource === 'dual' || settings.dual_mode_enabled || false;
+        this._updateDualModeButton();
+
+        if (!this.isRunning) {
+            this._setMixerStatsVisibility(false);
+        }
+    }
+
+    _setMixerStatsVisibility(visible) {
+        const statsSection = document.getElementById('mixer-stats-section');
+        if (statsSection) statsSection.style.display = visible ? '' : 'none';
+    }
+
+    _renderMixerStats(stats) {
+        const orig = document.getElementById('stat-orig-lufs');
+        const trans = document.getElementById('stat-trans-lufs');
+        const gain = document.getElementById('stat-gain');
+        const badge = document.getElementById('stat-speech-badge');
+
+        if (orig) orig.textContent = Number.isFinite(stats?.original_lufs) ? stats.original_lufs.toFixed(1) : '—';
+        if (trans) trans.textContent = Number.isFinite(stats?.translated_lufs) ? stats.translated_lufs.toFixed(1) : '—';
+        if (gain) {
+            const gainPct = Math.round(((stats?.ducking_gain ?? 1.0) * 100));
+            gain.textContent = `${gainPct}`;
+        }
+        if (badge) badge.style.display = stats?.is_speech ? '' : 'none';
+    }
+
+    _startMixerStatsPoll() {
+        this._stopMixerStatsPoll();
+        this._setMixerStatsVisibility(true);
+
+        this._mixerStatsPollTimer = setInterval(async () => {
+            if (!this.isRunning) return;
+
+            try {
+                const stats = await invoke('mixer_get_stats');
+                if (!stats) return;
+                this._renderMixerStats(stats);
+            } catch (err) {
+                console.warn('[Mixer] Stats poll failed:', err);
+            }
+        }, 500);
+    }
+
+    _stopMixerStatsPoll() {
+        if (this._mixerStatsPollTimer) {
+            clearInterval(this._mixerStatsPollTimer);
+            this._mixerStatsPollTimer = null;
+        }
+        this._setMixerStatsVisibility(false);
+        this._renderMixerStats(null);
     }
 
     // ─── TTS Control ──────────────────────────────────────
@@ -666,15 +1426,18 @@ class App {
         return edgeTTSRust;
     }
 
-    _configureTTS(tts, settings) {
+    _configureTTS(tts, settings, stream = null) {
         const provider = settings.tts_provider || 'edge';
+        const cfg = stream === 'A' ? this.dualConfig.streamA
+                  : stream === 'B' ? this.dualConfig.streamB
+                  : null;
         if (provider === 'elevenlabs') {
             tts.configure({
                 apiKey: settings.elevenlabs_api_key,
-                voiceId: settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM',
+                voiceId: cfg?.elevenLabsVoiceId || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM',
             });
         } else if (provider === 'google') {
-            const voice = settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+            const voice = cfg?.googleVoice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
             const langCode = voice.replace(/-Chirp3.*/, '');
             tts.configure({
                 apiKey: settings.google_tts_api_key,
@@ -684,8 +1447,9 @@ class App {
             });
         } else {
             tts.configure({
-                voice: settings.edge_tts_voice || 'vi-VN-HoaiMyNeural',
-                speed: settings.edge_tts_speed !== undefined ? settings.edge_tts_speed : 20,
+                voice: cfg?.edgeVoice || settings.edge_tts_voice || 'vi-VN-HoaiMyNeural',
+                speed: cfg?.edgeSpeed !== undefined ? cfg.edgeSpeed
+                     : (settings.edge_tts_speed !== undefined ? settings.edge_tts_speed : 20),
             });
         }
     }
@@ -709,6 +1473,15 @@ class App {
         if (ed) ed.style.display = provider === 'edge' ? '' : 'none';
         if (go) go.style.display = provider === 'google' ? '' : 'none';
         if (el) el.style.display = provider === 'elevenlabs' ? '' : 'none';
+        // Per-stream voice sections
+        for (const s of ['a', 'b']) {
+            const sEdge = document.getElementById(`stream-${s}-tts-voice-edge`);
+            const sGoogle = document.getElementById(`stream-${s}-tts-voice-google`);
+            const sEl = document.getElementById(`stream-${s}-tts-voice-elevenlabs`);
+            if (sEdge) sEdge.style.display = provider === 'edge' ? '' : 'none';
+            if (sGoogle) sGoogle.style.display = provider === 'google' ? '' : 'none';
+            if (sEl) sEl.style.display = provider === 'elevenlabs' ? '' : 'none';
+        }
         // Update hint text
         const hint = document.getElementById('tts-provider-hint');
         if (hint) {
@@ -733,27 +1506,445 @@ class App {
 
     _speakIfEnabled(text) {
         if (this.ttsEnabled && text?.trim()) {
-            this._getActiveTTS().speak(text);
+            const stream = this.currentSource === 'system'
+                ? 'A'
+                : (this.currentSource === 'microphone' ? 'B' : 'single');
+            this._speakWithRouting(text, { stream, inject: false, playLocal: true });
+        }
+    }
+
+    _speakWithRouting(text, options = {}) {
+        if (!text?.trim()) return;
+        const tts = this._getActiveTTS();
+        const settings = settingsManager.get();
+        const stream = options.stream;
+        this._configureTTS(tts, settings, (stream === 'A' || stream === 'B') ? stream : null);
+
+        // Defensive: keep provider/session ready for single-mode narration as well.
+        if (!tts.isConnected) {
+            tts.connect?.();
+        }
+        audioPlayer.resume();
+
+        tts.speak(text, options);
+    }
+
+    async _handleTtsAudioChunk(base64Audio, meta) {
+        if (!base64Audio) return;
+
+        const route = meta || {};
+        const inject = route.inject === true;
+        const playLocal = route.playLocal !== false;
+        const stream = route.stream || 'single';
+
+        if (playLocal) {
+            let gain = 1.0;
+            if (stream === 'A') {
+                gain = this._clampVolume(this.dualConfig.streamA.translatedVolume, 1.0);
+            }
+            await audioPlayer.enqueue(base64Audio, gain);
+        }
+
+        if (inject) {
+            await this._injectAudioChunk(
+                base64Audio,
+                stream,
+                this._clampVolume(this.dualConfig.streamB.translatedVolume, 1.0)
+            );
+        }
+    }
+
+    _clampVolume(value, fallback = 1.0) {
+        if (!Number.isFinite(value)) return fallback;
+        return Math.max(0, Math.min(2, value));
+    }
+
+    _scalePcm16Bytes(pcmData, gain) {
+        const clampedGain = this._clampVolume(gain, 1.0);
+        if (Math.abs(clampedGain - 1.0) < 0.0001) {
+            return Array.isArray(pcmData) ? pcmData : Array.from(new Uint8Array(pcmData));
+        }
+
+        const bytes = Array.isArray(pcmData) ? new Uint8Array(pcmData) : new Uint8Array(pcmData);
+        const samples = new Int16Array(bytes.buffer.slice(0));
+        for (let i = 0; i < samples.length; i++) {
+            const scaled = Math.round(samples[i] * clampedGain);
+            samples[i] = Math.max(-32768, Math.min(32767, scaled));
+        }
+        return Array.from(new Uint8Array(samples.buffer));
+    }
+
+    async _injectPcmBytesNow(pcmData, stream, volume = 1.0) {
+        const scaledPcm = this._scalePcm16Bytes(pcmData, volume);
+        await invoke('inject_pcm_to_device', {
+            deviceName: this.injectDeviceName,
+            pcmData: scaledPcm,
+            sampleRate: 16000,
+        });
+        this._injectFailureCount = 0;
+        this._injectUsedLegacyFallback = false;
+    }
+
+    // Mix secondary PCM into primary at secondaryGain. Returns new byte array (s16le).
+    _mixPcm16Bytes(primaryBytes, secondaryBytes, secondaryGain) {
+        const toI16 = (arr) => {
+            const b = Array.isArray(arr) ? new Uint8Array(arr) : new Uint8Array(arr);
+            return new Int16Array(b.buffer.slice(0));
+        };
+        const pSamples = toI16(primaryBytes);
+        const sSamples = toI16(secondaryBytes);
+        const out = new Int16Array(pSamples.length);
+        for (let i = 0; i < pSamples.length; i++) {
+            const s = i < sSamples.length ? Math.round(sSamples[i] * secondaryGain) : 0;
+            out[i] = Math.max(-32768, Math.min(32767, pSamples[i] + s));
+        }
+        return Array.from(new Uint8Array(out.buffer));
+    }
+
+    _enqueuePcmInject(pcmData, stream, volume = 1.0, priority = 'translated') {
+        const item = {
+            pcmData: Array.isArray(pcmData) ? pcmData : Array.from(new Uint8Array(pcmData)),
+            stream,
+            volume,
+        };
+        if (priority === 'original') {
+            this._originalInjectQueue.push(item);
+            if (this._originalInjectQueue.length > 8) {
+                this._originalInjectQueue.splice(0, this._originalInjectQueue.length - 8);
+            }
+        } else {
+            this._translatedInjectQueue.push(item);
+            if (this._translatedInjectQueue.length > 3) {
+                this._translatedInjectQueue.splice(0, this._translatedInjectQueue.length - 3);
+            }
+        }
+        this._runInjectPump();
+    }
+
+    async _runInjectPump() {
+        if (this._isPumpRunning) return;
+        this._isPumpRunning = true;
+
+        try {
+            while (this.isRunning) {
+                if (this._translatedInjectQueue.length > 0) {
+                    const item = this._translatedInjectQueue.shift();
+                    let pcmToPlay = item.pcmData;
+
+                    // Mix in all pending original using each chunk's own configured volume.
+                    if (this._originalInjectQueue.length > 0) {
+                        const origBytes = [];
+                        let origVolume = 1.0;
+                        while (this._originalInjectQueue.length > 0) {
+                            const orig = this._originalInjectQueue.shift();
+                            origVolume = orig.volume;
+                            Array.prototype.push.apply(origBytes, orig.pcmData);
+                        }
+                        const mixerCfgPump = settingsManager.get().mixer || {};
+                        if (mixerCfgPump.enabled !== false) {
+                            try {
+                                const result = await invoke('mixer_process_chunk', {
+                                    originalPcmBytes: origBytes,
+                                    translatedPcmBytes: item.pcmData,
+                                });
+                                pcmToPlay = result.mixed_pcm;
+                            } catch (_e) {
+                                pcmToPlay = this._mixPcm16Bytes(pcmToPlay, origBytes, origVolume);
+                            }
+                        } else {
+                            pcmToPlay = this._mixPcm16Bytes(pcmToPlay, origBytes, origVolume);
+                        }
+                    }
+
+                    await this._injectPcmBytesNow(pcmToPlay, item.stream, item.volume);
+
+                } else if (this._originalInjectQueue.length > 0) {
+                    // No translated: batch all pending original into one call.
+                    const origBytes = [];
+                    let stream = 'B';
+                    let volume = 1.0;
+                    while (this._originalInjectQueue.length > 0) {
+                        const orig = this._originalInjectQueue.shift();
+                        Array.prototype.push.apply(origBytes, orig.pcmData);
+                        stream = orig.stream;
+                        volume = orig.volume;
+                    }
+                    await this._injectPcmBytesNow(origBytes, stream, volume);
+
+                } else {
+                    break;
+                }
+            }
+        } catch (err) {
+            this._injectFailureCount += 1;
+            const now = Date.now();
+            if (now - this._lastInjectErrorTs > 5000) {
+                this._lastInjectErrorTs = now;
+                this._showToast(`Inject failed: ${err}`, 'error');
+            }
+            if (this._injectFailureCount >= 3 && this.dualConfig?.streamB?.injectEnabled) {
+                this.dualConfig.streamB.injectEnabled = false;
+                this._showToast('Audio injection auto-disabled after repeated failures', 'info');
+            }
+        } finally {
+            this._isPumpRunning = false;
+            if (this.isRunning && (this._translatedInjectQueue.length > 0 || this._originalInjectQueue.length > 0)) {
+                this._runInjectPump();
+            }
+        }
+    }
+
+    async _injectAudioChunk(base64Audio, stream, volume = 1.0) {
+        try {
+            const pcmData = await this._decodeBase64ToPcm16Mono(base64Audio, 16000);
+            this._enqueuePcmInject(pcmData, stream, volume, 'translated');
+        } catch (err) {
+            // Backward-compatible fallback: old afplay-based inject path.
+            try {
+                console.warn('[Inject] Direct PCM device injection failed, fallback to afplay:', err);
+                await invoke('inject_audio_to_device', {
+                    deviceName: this.injectDeviceName,
+                    base64Audio,
+                });
+                this._injectFailureCount = 0;
+                if (!this._injectUsedLegacyFallback) {
+                    this._injectUsedLegacyFallback = true;
+                    this._showToast('Direct inject failed; using legacy fallback (system output)', 'info');
+                }
+                return;
+            } catch (_fallbackErr) {
+                // Continue with normal error handling below.
+                console.error('[Inject] Legacy fallback also failed:', _fallbackErr);
+            }
+
+            this._injectFailureCount += 1;
+            const now = Date.now();
+            if (now - this._lastInjectErrorTs > 5000) {
+                this._lastInjectErrorTs = now;
+                this._showToast(`Stream ${stream} inject failed: ${err}`, 'error');
+            }
+
+            // Hardening: disable injection after repeated failures to keep translation running.
+            if (this._injectFailureCount >= 3 && this.dualConfig.streamB.injectEnabled) {
+                this.dualConfig.streamB.injectEnabled = false;
+                this._showToast('Audio injection auto-disabled after repeated failures', 'info');
+            }
+        }
+    }
+
+    _enqueueInjectText(text) {
+        if (!text?.trim()) return;
+        this._injectTextQueue.push(text.trim());
+        if (!this._isInjectingText) {
+            this._processInjectTextQueue();
+        }
+    }
+
+    // Synthesize text using the active TTS provider from general settings.
+    // stream='A' or 'B' selects per-stream voice; otherwise uses global voice.
+    async _ttsGetBase64(text, stream = 'B') {
+        const s = settingsManager.get();
+        const provider = s.tts_provider || 'edge';
+        const cfg = stream === 'A' ? this.dualConfig.streamA
+                  : stream === 'B' ? this.dualConfig.streamB
+                  : null;
+
+        if (provider === 'google' && s.google_tts_api_key) {
+            const voice = cfg?.googleVoice || s.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+            const langCode = voice.replace(/-Chirp3.*$/, '').replace(/-[A-Z][a-z]+.*$/, (m) => m.split('-').slice(0, 2).join('-'));
+            const res = await fetch(
+                `https://texttospeech.googleapis.com/v1/text:synthesize?key=${s.google_tts_api_key}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        input: { text },
+                        voice: { languageCode: langCode, name: voice },
+                        audioConfig: { audioEncoding: 'MP3', speakingRate: s.google_tts_speed || 1.0 },
+                    }),
+                }
+            );
+            if (!res.ok) throw new Error(`Google TTS HTTP ${res.status}`);
+            const data = await res.json();
+            return data.audioContent;
+        }
+
+        if (provider === 'elevenlabs' && s.elevenlabs_api_key) {
+            const voiceId = cfg?.elevenLabsVoiceId || s.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
+            const res = await fetch(
+                `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'xi-api-key': s.elevenlabs_api_key,
+                    },
+                    body: JSON.stringify({
+                        text,
+                        model_id: 'eleven_flash_v2_5',
+                        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+                    }),
+                }
+            );
+            if (!res.ok) throw new Error(`ElevenLabs HTTP ${res.status}`);
+            const buf = await res.arrayBuffer();
+            const bytes = new Uint8Array(buf);
+            let binary = '';
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            return btoa(binary);
+        }
+
+        // Default: Edge TTS
+        const voice = cfg?.edgeVoice || s.edge_tts_voice || 'vi-VN-HoaiMyNeural';
+        const rate = cfg?.edgeSpeed !== undefined ? cfg.edgeSpeed
+                   : (s.edge_tts_speed !== undefined ? s.edge_tts_speed : 20);
+        return await invoke('edge_tts_speak', { text, voice, rate });
+    }
+
+    async _processInjectTextQueue() {
+        if (this._isInjectingText) return;
+        this._isInjectingText = true;
+
+        try {
+            while (this._injectTextQueue.length > 0 && this.isRunning) {
+                const text = this._injectTextQueue.shift();
+                const base64Audio = await this._ttsGetBase64(text, 'B');
+                await this._injectAudioChunk(
+                    base64Audio,
+                    'B',
+                    this._clampVolume(this.dualConfig.streamB.translatedVolume, 1.0)
+                );
+            }
+        } catch (err) {
+            console.error('[Inject] Direct translated-text injection failed:', err);
+            this._showToast(`Direct inject failed: ${err}`, 'error');
+        } finally {
+            this._isInjectingText = false;
+        }
+    }
+
+    async _decodeBase64ToPcm16Mono(base64Audio, targetSampleRate = 16000) {
+        if (!base64Audio) throw new Error('Empty TTS audio');
+
+        // Ensure we have an AudioContext available for decoding.
+        audioPlayer.init();
+        await audioPlayer.resume();
+
+        const binary = atob(base64Audio);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+
+        const arrayBuffer = bytes.buffer.slice(0);
+        const audioBuffer = await audioPlayer.audioContext.decodeAudioData(arrayBuffer);
+
+        const srcRate = audioBuffer.sampleRate;
+        const channels = audioBuffer.numberOfChannels;
+        const srcLength = audioBuffer.length;
+        const ratio = srcRate / targetSampleRate;
+        const outLength = Math.max(1, Math.floor(srcLength / ratio));
+
+        const chData = [];
+        for (let c = 0; c < channels; c++) {
+            chData.push(audioBuffer.getChannelData(c));
+        }
+
+        const pcm = new Int16Array(outLength);
+        for (let i = 0; i < outLength; i++) {
+            const srcIdx = Math.min(srcLength - 1, Math.floor(i * ratio));
+            let mixed = 0;
+            for (let c = 0; c < channels; c++) {
+                mixed += chData[c][srcIdx];
+            }
+            mixed /= channels;
+            const clamped = Math.max(-1, Math.min(1, mixed));
+            pcm[i] = clamped < 0 ? clamped * 32768 : clamped * 32767;
+        }
+
+        return Array.from(new Uint8Array(pcm.buffer));
+    }
+
+    _isRunActive(runId) {
+        return this.isRunning && this._runId === runId;
+    }
+
+    _recordDualStreamError(stream) {
+        const now = Date.now();
+        const arr = this._dualStreamErrorHistory[stream] || [];
+        arr.push(now);
+        this._dualStreamErrorHistory[stream] = arr.filter((ts) => now - ts < 20000);
+    }
+
+    _updateDualStreamStatus(stream, status, runId) {
+        if (!this._isRunActive(runId)) return;
+
+        this._dualStreamStates[stream] = status;
+
+        // Stream A remains the primary status indicator for the global badge.
+        if (stream === 'A') {
+            this._updateStatus(status);
+        }
+
+        if (status === 'connected') {
+            this._dualStreamErrorHistory[stream] = [];
+        }
+
+        if (status === 'error') {
+            this._handleDualStreamError(stream, 'Connection error', runId);
+        }
+    }
+
+    _handleDualStreamError(stream, error, runId) {
+        if (!this._isRunActive(runId)) return;
+
+        this._dualStreamStates[stream] = 'error';
+        this._recordDualStreamError(stream);
+
+        const now = Date.now();
+        const lastTs = this._lastStreamErrorToastTs[stream] || 0;
+        if (now - lastTs > 4000) {
+            this._lastStreamErrorToastTs[stream] = now;
+            this._showToast(`Stream ${stream}: ${error}`, 'error');
+        }
+
+        const errA = (this._dualStreamErrorHistory.A || []).length;
+        const errB = (this._dualStreamErrorHistory.B || []).length;
+
+        // If both streams are failing repeatedly in a short window, stop safely.
+        if (errA >= 2 && errB >= 2 && this.isRunning) {
+            this._showToast('Both streams unstable. Stopping capture safely.', 'error');
+            this.stop();
         }
     }
 
     // ─── Source Control ────────────────────────────────────
 
     _setSource(source) {
+        if (!['system', 'microphone', 'dual'].includes(source)) return;
         const wasRunning = this.isRunning;
+        const sourceLabel = source === 'system'
+            ? 'System Audio'
+            : (source === 'microphone' ? 'Microphone' : 'Dual Conversation');
 
         // If currently running, restart with new source
         if (wasRunning) {
             this.stop().then(() => {
                 this.currentSource = source;
+                this.dualModeEnabled = source === 'dual';
+                this.transcriptUI.configure({ viewMode: source === 'dual' ? 'dual' : 'single' });
+                document.getElementById('btn-view-mode')?.classList.toggle('active', source === 'dual');
                 this._updateSourceButtons();
-                this._showToast(`Switched to ${source === 'system' ? 'System Audio' : 'Microphone'}`, 'success');
+                this._showToast(`Switched to ${sourceLabel}`, 'success');
                 this.start();
             });
         } else {
             this.currentSource = source;
+            this.dualModeEnabled = source === 'dual';
+            this.transcriptUI.configure({ viewMode: source === 'dual' ? 'dual' : 'single' });
+            document.getElementById('btn-view-mode')?.classList.toggle('active', source === 'dual');
             this._updateSourceButtons();
-            this._showToast(`Source: ${source === 'system' ? 'System Audio' : 'Microphone'}`, 'success');
+            this._showToast(`Source: ${sourceLabel}`, 'success');
         }
     }
 
@@ -762,6 +1953,9 @@ class App {
             this.currentSource === 'system');
         document.getElementById('btn-source-mic').classList.toggle('active',
             this.currentSource === 'microphone');
+        document.getElementById('btn-dual-mode')?.classList.toggle('active',
+            this.currentSource === 'dual');
+        this._syncQuickLocaleControls(settingsManager.get());
     }
 
     _updateModeUI(mode) {
@@ -794,6 +1988,10 @@ class App {
         }
 
         this.isRunning = true;
+        this._runId += 1;
+        const runId = this._runId;
+        this._dualStreamStates = { A: 'idle', B: 'idle' };
+        this._dualStreamErrorHistory = { A: [], B: [] };
         this._updateStartButton();
         if (!this.recordingStartTime) this.recordingStartTime = Date.now();
 
@@ -805,10 +2003,14 @@ class App {
         }
 
         if (this.translationMode === 'local') {
-            await this._startLocalMode(settings);
+            await this._startLocalMode(settings, runId);
+        } else if (this.currentSource === 'dual') {
+            await this._startDualCapture(settings, runId);
         } else {
-            await this._startSonioxMode(settings);
+            await this._startSonioxMode(settings, runId);
         }
+
+        this._startMixerStatsPoll();
 
         // Start TTS if enabled
         if (this.ttsEnabled) {
@@ -819,7 +2021,7 @@ class App {
         }
     }
 
-    async _startSonioxMode(settings) {
+    async _startSonioxMode(settings, runId) {
         // Connect to Soniox
         console.log('[App] Connecting to Soniox...');
         this._updateStatus('connecting');
@@ -836,6 +2038,7 @@ class App {
 
             const channel = new window.__TAURI__.core.Channel();
             channel.onmessage = (pcmData) => {
+                if (!this._isRunActive(runId)) return;
                 audioChunkCount++;
                 if (audioChunkCount <= 3 || audioChunkCount % 50 === 0) {
                     console.log(`[Audio] Batch #${audioChunkCount}, size:`, pcmData?.length || 0);
@@ -858,7 +2061,7 @@ class App {
         }
     }
 
-    async _startLocalMode(settings) {
+    async _startLocalMode(settings, runId) {
         console.log('[App] Starting Local mode (MLX models)...');
         this._updateStatus('connecting');
 
@@ -903,6 +2106,7 @@ class App {
             this.localPipelineReady = false;
 
             this.localPipelineChannel.onmessage = (msg) => {
+                if (!this._isRunActive(runId)) return;
                 let data;
                 try {
                     data = (typeof msg === 'string') ? JSON.parse(msg) : msg;
@@ -942,6 +2146,7 @@ class App {
             let audioChunkCount = 0;
 
             audioChannel.onmessage = async (pcmData) => {
+                if (!this._isRunActive(runId)) return;
                 audioChunkCount++;
                 if (audioChunkCount <= 3 || audioChunkCount % 50 === 0) {
                     console.log(`[Local] Audio batch #${audioChunkCount}, size:`, pcmData?.length || 0);
@@ -1119,10 +2324,14 @@ class App {
     }
 
     async stop() {
+        // Invalidate all pending callbacks from previous run immediately.
+        this._runId += 1;
         this.isRunning = false;
+        this._dualStreamStates = { A: 'idle', B: 'idle' };
         this._updateStartButton();
+        this._stopMixerStatsPoll();
 
-        // Stop audio capture
+        // stop_capture covers both single and dual Rust-side captures
         try {
             await invoke('stop_capture');
         } catch (err) {
@@ -1139,8 +2348,17 @@ class App {
             this.localPipelineReady = false;
             this.transcriptUI.removeStatusMessage();
             this._updateStatus('disconnected');
+        } else if (this.currentSource === 'dual') {
+            // Disconnect both Soniox sessions
+            this.sonioxClientA?.disconnect();
+            this.sonioxClientB?.disconnect();
+            this.sonioxClientA = null;
+            this.sonioxClientB = null;
+            this._dualChannelA = null;
+            this._dualChannelB = null;
+            this._updateStatus('disconnected');
         } else {
-            // Disconnect Soniox
+            // Single stream — disconnect shared Soniox client
             sonioxClient.disconnect();
         }
 
@@ -1150,6 +2368,11 @@ class App {
         // Stop TTS
         elevenLabsTTS.disconnect();
         edgeTTSRust.disconnect();
+        googleTTS.disconnect();
+
+        this._originalInjectQueue = [];
+        this._translatedInjectQueue = [];
+        this._isPumpRunning = false;
 
         audioPlayer.stop();
 
@@ -1280,6 +2503,17 @@ class App {
         }
     }
 
+    async _centerWindow() {
+        try {
+            await this.appWindow.center();
+            await this._saveWindowPosition();
+            this._showToast('Window centered', 'success');
+        } catch (err) {
+            console.error('Failed to center window:', err);
+            this._showToast(`Failed to center window: ${err}`, 'error');
+        }
+    }
+
     // ─── Pin / Unpin (Always on Top) ────────────────────
 
     async _togglePin() {
@@ -1314,6 +2548,144 @@ class App {
         if (btn) btn.classList.toggle('active', newMode === 'dual');
     }
 
+    // ─── Dual Mode Control ──────────────────────────────────
+
+    _toggleDualMode() {
+        this._setSource('dual');
+    }
+
+    _updateDualModeButton() {
+        const btn = document.getElementById('btn-dual-mode');
+        if (btn) btn.classList.toggle('active', this.currentSource === 'dual');
+    }
+
+    /**
+     * Start dual-stream capture: Stream A = system audio, Stream B = microphone.
+     * Each stream has its own Soniox WebSocket session and independent callbacks.
+     */
+    async _startDualCapture(settings, runId) {
+        console.log('[App] _startDualCapture() starting...');
+        this._updateStatus('connecting');
+
+        const cfgA = this.dualConfig.streamA;
+        const cfgB = this.dualConfig.streamB;
+
+        // Dual mode uses stream-level TTS toggles, independent of runtime TTS button.
+        if (cfgA.ttsEnabled || cfgB.ttsEnabled) {
+            const tts = this._getActiveTTS();
+            this._configureTTS(tts, settings);
+            tts.connect?.();
+            audioPlayer.resume();
+        }
+
+        // Create two independent Soniox clients
+        this.sonioxClientA = new SonioxClient();
+        this.sonioxClientB = new SonioxClient();
+
+        // Wire Stream A callbacks
+        this.sonioxClientA.onOriginal = (text, speaker) =>
+            this._isRunActive(runId) && this.transcriptUI.addOriginalForStream('A', text, speaker);
+        this.sonioxClientA.onTranslation = (text) => {
+            if (!this._isRunActive(runId)) return;
+            this.transcriptUI.addTranslationForStream('A', text);
+            if (cfgA.ttsEnabled && text?.trim()) {
+                this._speakWithRouting(text, { stream: 'A', inject: false, playLocal: true });
+            }
+        };
+        this.sonioxClientA.onProvisional = (text, speaker) =>
+            this._isRunActive(runId) && this.transcriptUI.setProvisionalForStream('A', text || '', speaker);
+        this.sonioxClientA.onStatusChange = (status) => this._updateDualStreamStatus('A', status, runId);
+        this.sonioxClientA.onError = (err) => this._handleDualStreamError('A', err, runId);
+
+        // Wire Stream B callbacks
+        this.sonioxClientB.onOriginal = (text, speaker) =>
+            this._isRunActive(runId) && this.transcriptUI.addOriginalForStream('B', text, speaker);
+        this.sonioxClientB.onTranslation = (text) => {
+            if (!this._isRunActive(runId)) return;
+            this.transcriptUI.addTranslationForStream('B', text);
+            console.log('[DualB] translation received, tts=', cfgB.ttsEnabled, 'inject=', cfgB.injectEnabled);
+            if (cfgB.ttsEnabled && text?.trim()) {
+                this._speakWithRouting(text, {
+                    stream: 'B',
+                    inject: false,
+                    playLocal: true,
+                });
+            }
+
+            if (cfgB.injectEnabled && text?.trim()) {
+                this._enqueueInjectText(text);
+            }
+        };
+        this.sonioxClientB.onProvisional = (text, speaker) =>
+            this._isRunActive(runId) && this.transcriptUI.setProvisionalForStream('B', text || '', speaker);
+        this.sonioxClientB.onStatusChange = (status) => this._updateDualStreamStatus('B', status, runId);
+        this.sonioxClientB.onError = (err) => this._handleDualStreamError('B', err, runId);
+
+        // Connect both Soniox sessions
+        this.sonioxClientA.connect({
+            apiKey: settings.soniox_api_key,
+            sourceLanguage: cfgA.sourceLanguage,
+            targetLanguage: cfgA.targetLanguage,
+            customContext: settings.custom_context,
+        });
+        this.sonioxClientB.connect({
+            apiKey: settings.soniox_api_key,
+            sourceLanguage: cfgB.sourceLanguage,
+            targetLanguage: cfgB.targetLanguage,
+            customContext: settings.custom_context,
+        });
+
+        // Create two Tauri channels
+        const channelA = new window.__TAURI__.core.Channel();
+        const channelB = new window.__TAURI__.core.Channel();
+        this._dualChannelA = channelA;
+        this._dualChannelB = channelB;
+
+        let audioCountA = 0;
+        let audioCountB = 0;
+
+        channelA.onmessage = (pcmData) => {
+            if (!this._isRunActive(runId)) return;
+            audioCountA++;
+            if (audioCountA <= 3 || audioCountA % 50 === 0)
+                console.log(`[DualA] Batch #${audioCountA}, size:`, pcmData?.length || 0);
+            this.sonioxClientA.sendAudio(new Uint8Array(pcmData).buffer);
+        };
+
+        channelB.onmessage = (pcmData) => {
+            if (!this._isRunActive(runId)) return;
+            audioCountB++;
+            if (audioCountB <= 3 || audioCountB % 50 === 0)
+                console.log(`[DualB] Batch #${audioCountB}, size:`, pcmData?.length || 0);
+            const bytes = new Uint8Array(pcmData);
+            this.sonioxClientB.sendAudio(bytes.buffer);
+
+            if (cfgB.injectEnabled && cfgB.mixOriginalEnabled) {
+                this._enqueuePcmInject(
+                    bytes,
+                    'B',
+                    this._clampVolume(cfgB.originalVolume, 1.0),
+                    'original'
+                );
+            }
+        };
+
+        // Start dual capture on the Rust side
+        try {
+            await invoke('start_dual_capture', {
+                channelA,
+                channelB,
+            });
+            console.log('[App] Dual capture started — Stream A: system audio, Stream B: microphone');
+        } catch (err) {
+            console.error('[App] start_dual_capture failed:', err);
+            this._showToast(`Dual capture error: ${err}`, 'error');
+            this.sonioxClientA.disconnect();
+            this.sonioxClientB.disconnect();
+            await this.stop();
+        }
+    }
+
     _adjustFontSize(delta) {
         const current = this.transcriptUI.fontSize || 16;
         const newSize = Math.max(12, Math.min(140, current + delta));
@@ -1334,53 +2706,11 @@ class App {
 
     async _checkForUpdates() {
         updater.onUpdateFound = (version, notes) => {
-            this._showUpdateNotification(version, notes);
+            // Silent mode: do not show in-app update CTA/toast.
+            console.log(`[Updater] Update v${version} found (notification suppressed)`);
         };
         // Delay check slightly so app finishes loading first
         setTimeout(() => updater.checkForUpdates(), 3000);
-    }
-
-    _showUpdateNotification(version, notes) {
-        // Remove existing toast
-        const existing = document.querySelector('.toast');
-        if (existing) existing.remove();
-
-        const toast = document.createElement('div');
-        toast.className = 'toast update-toast show';
-        toast.innerHTML = `
-            <span>🆕 Update v${version} available</span>
-            <button id="btn-update-now" style="margin-left:8px;padding:2px 10px;border-radius:4px;border:none;background:#4CAF50;color:#fff;cursor:pointer;font-size:12px;">Update now</button>
-            <button id="btn-update-dismiss" style="margin-left:4px;padding:2px 6px;border-radius:4px;border:none;background:rgba(255,255,255,0.15);color:#fff;cursor:pointer;font-size:12px;">✕</button>
-        `;
-        document.body.appendChild(toast);
-
-        document.getElementById('btn-update-dismiss').addEventListener('click', () => {
-            toast.classList.remove('show');
-            setTimeout(() => toast.remove(), 300);
-        });
-
-        document.getElementById('btn-update-now').addEventListener('click', async () => {
-            const btn = document.getElementById('btn-update-now');
-            btn.textContent = 'Downloading...';
-            btn.disabled = true;
-
-            try {
-                await updater.downloadAndInstall((downloaded, total) => {
-                    if (total > 0) {
-                        const pct = Math.round((downloaded / total) * 100);
-                        btn.textContent = `${pct}%`;
-                    }
-                });
-                btn.textContent = 'Restarting...';
-            } catch (err) {
-                btn.textContent = 'Failed';
-                console.error('[Update]', err);
-                setTimeout(() => {
-                    toast.classList.remove('show');
-                    setTimeout(() => toast.remove(), 300);
-                }, 3000);
-            }
-        });
     }
 
     _showToast(message, type = 'success') {

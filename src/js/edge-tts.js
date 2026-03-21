@@ -31,9 +31,9 @@ class EdgeTTSRust {
         console.log('[Edge TTS] Ready via Rust proxy');
     }
 
-    speak(text) {
+    speak(text, meta = null) {
         if (!text?.trim()) return;
-        this._queue.push(text.trim());
+        this._queue.push({ text: text.trim(), meta });
         if (!this._isSpeaking) {
             this._processQueue();
         }
@@ -46,7 +46,9 @@ class EdgeTTSRust {
         }
 
         this._isSpeaking = true;
-        const text = this._queue.shift();
+        const entry = this._queue.shift();
+        const text = entry?.text || '';
+        const meta = entry?.meta || null;
         const startTime = performance.now();
 
         try {
@@ -60,7 +62,7 @@ class EdgeTTSRust {
             console.log(`[Edge TTS] Audio received in ${elapsed.toFixed(0)}ms`);
 
             if (this.onAudioChunk) {
-                this.onAudioChunk(base64Audio, true);
+                this.onAudioChunk(base64Audio, true, meta);
             }
         } catch (err) {
             console.error('[Edge TTS] Error:', err);

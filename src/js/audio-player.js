@@ -6,7 +6,7 @@
 class AudioPlayer {
     constructor() {
         this.audioContext = null;
-        this._queue = [];           // AudioBuffer queue
+        this._queue = [];           // Queue of { buffer, gain }
         this._isPlaying = false;
         this._nextStartTime = 0;
         this._enabled = true;
@@ -36,8 +36,9 @@ class AudioPlayer {
     /**
      * Enqueue a base64-encoded audio chunk for playback.
      * @param {string} base64Audio - base64-encoded MP3 data
+     * @param {number} gain - linear gain multiplier (0.0 - 2.0)
      */
-    async enqueue(base64Audio) {
+    async enqueue(base64Audio, gain = 1.0) {
         if (!this._enabled || !this.audioContext || !base64Audio) return;
 
         // Ensure context is running
@@ -61,7 +62,10 @@ class AudioPlayer {
                 console.warn(`[AudioPlayer] Dropped ${dropped} stale audio buffer(s)`);
             }
 
-            this._queue.push(audioBuffer);
+            this._queue.push({
+                buffer: audioBuffer,
+                gain: Number.isFinite(gain) ? Math.max(0, Math.min(2, gain)) : 1.0,
+            });
             this._scheduleNext();
         } catch (e) {
             // Small/empty chunks may fail to decode — that's OK
@@ -85,10 +89,15 @@ class AudioPlayer {
             return;
         }
 
-        const buffer = this._queue.shift();
+        const item = this._queue.shift();
+        const buffer = item.buffer;
+        const gainValue = item.gain;
         const source = this.audioContext.createBufferSource();
+        const gainNode = this.audioContext.createGain();
         source.buffer = buffer;
-        source.connect(this.audioContext.destination);
+        gainNode.gain.value = gainValue;
+        source.connect(gainNode);
+        gainNode.connect(this.audioContext.destination);
 
         // Schedule seamlessly after previous chunk
         const currentTime = this.audioContext.currentTime;

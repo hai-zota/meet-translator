@@ -62,9 +62,9 @@ class GoogleTTS {
         console.log('[Google TTS] Ready (Chirp 3 HD)');
     }
 
-    speak(text) {
+    speak(text, meta = null) {
         if (!text?.trim()) return;
-        this._queue.push(text.trim());
+        this._queue.push({ text: text.trim(), meta });
         if (!this._isSpeaking) {
             this._processQueue();
         }
@@ -77,7 +77,9 @@ class GoogleTTS {
         }
 
         this._isSpeaking = true;
-        const text = this._queue.shift();
+        const entry = this._queue.shift();
+        const text = entry?.text || '';
+        const meta = entry?.meta || null;
         const startTime = performance.now();
 
         try {
@@ -108,7 +110,7 @@ class GoogleTTS {
             console.log(`[Google TTS] Audio received in ${elapsed.toFixed(0)}ms`);
 
             if (data.audioContent && this.onAudioChunk) {
-                this.onAudioChunk(data.audioContent, true);
+                this.onAudioChunk(data.audioContent, true, meta);
             }
         } catch (err) {
             console.error('[Google TTS] Error:', err);

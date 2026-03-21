@@ -45,6 +45,11 @@
               <line x1="8" y1="23" x2="16" y2="23" />
             </svg>
           </button>
+          <button id="btn-dual-mode" class="source-btn" title="Dual Conversation (⌘B)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+            </svg>
+          </button>
         </div>
 
         <button id="btn-start" class="action-btn" title="Start/Stop (Space)">
@@ -139,6 +144,16 @@
 
     <!-- Floating controls (bottom) -->
     <div class="floating-controls">
+      <div class="quick-locale-controls" id="quick-locale-controls">
+        <div class="quick-row" id="quick-my-row">
+          <select id="quick-my-language" class="quick-select quick-language-select" title="My Language"></select>
+          <select id="quick-my-voice" class="quick-select quick-voice" title="My Voice"></select>
+        </div>
+        <div class="quick-row" id="quick-meeting-row" style="display:none;">
+          <select id="quick-meeting-language" class="quick-select quick-language-select" title="Meeting Language"></select>
+          <select id="quick-meeting-voice" class="quick-select quick-voice" title="Meeting Voice"></select>
+        </div>
+      </div>
       <div class="font-controls">
         <button id="btn-font-down" class="float-btn" title="Decrease font size">A−</button>
         <span id="font-size-display" class="font-size-label">16</span>
@@ -149,6 +164,15 @@
         <button class="color-dot" data-color="#ffd700" title="Yellow" style="background:#ffd700;"></button>
         <button class="color-dot" data-color="#00e5ff" title="Cyan" style="background:#00e5ff;"></button>
       </div>
+      <button id="btn-center-window" class="float-btn" title="Center app window">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3" />
+          <line x1="12" y1="2" x2="12" y2="6" />
+          <line x1="12" y1="18" x2="12" y2="22" />
+          <line x1="2" y1="12" x2="6" y2="12" />
+          <line x1="18" y1="12" x2="22" y2="12" />
+        </svg>
+      </button>
       <button id="btn-view-mode" class="float-btn" title="Toggle dual view">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="3" y="3" width="7" height="18" rx="1" />
@@ -186,6 +210,8 @@
         <button class="settings-tab active" data-tab="tab-translation">Translation</button>
         <button class="settings-tab" data-tab="tab-display">Display</button>
         <button class="settings-tab" data-tab="tab-tts">TTS</button>
+        <button class="settings-tab" data-tab="tab-dual">Dual</button>
+        <button class="settings-tab" data-tab="tab-mixer">Mixer</button>
       </div>
 
       <!-- Tab: Translation -->
@@ -254,7 +280,7 @@
           <div class="radio-group" id="audio-source-group">
             <label class="radio-option"><input type="radio" name="audio-source" value="system" checked /><span class="radio-label">System</span></label>
             <label class="radio-option"><input type="radio" name="audio-source" value="microphone" /><span class="radio-label">Mic</span></label>
-            <label class="radio-option"><input type="radio" name="audio-source" value="both" /><span class="radio-label">Both</span></label>
+            <label class="radio-option"><input type="radio" name="audio-source" value="dual" /><span class="radio-label">Dual Conversation</span></label>
           </div>
         </div>
 
@@ -397,6 +423,294 @@
               <option value="onwK4e9ZLuTAKqWW03F9">Daniel — Male</option>
               <option value="pNInz6obpgDQGcFmaJgB">Adam — Male</option>
             </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Dual Mode -->
+      <div class="settings-tab-content" id="tab-dual">
+        <div class="settings-section">
+          <label class="checkbox-option">
+            <input type="checkbox" id="check-dual-mode" />
+            <span class="checkbox-label">Enable Dual Mode</span>
+          </label>
+          <p class="hint">Translate two audio streams simultaneously — system audio (Stream A) and microphone (Stream B)</p>
+        </div>
+
+        <div id="dual-mode-config" style="display:none">
+          <!-- Stream A -->
+          <div class="settings-section">
+            <span class="field-label" style="color:#00e5ff;">Stream A — System Audio</span>
+            <div class="field-row" style="margin-top:6px;">
+              <div class="field">
+                <span class="field-label">Source</span>
+                <select id="select-stream-a-source">
+                  <option value="auto">Auto-detect</option>
+                  <option value="en">English</option>
+                  <option value="ja">Japanese</option>
+                  <option value="ko">Korean</option>
+                  <option value="zh">Chinese</option>
+                  <option value="fr">French</option>
+                  <option value="de">German</option>
+                  <option value="es">Spanish</option>
+                  <option value="vi">Vietnamese</option>
+                  <option value="th">Thai</option>
+                  <option value="id">Indonesian</option>
+                </select>
+              </div>
+              <div class="field">
+                <span class="field-label">Target</span>
+                <select id="select-stream-a-target">
+                  <option value="vi">Vietnamese</option>
+                  <option value="en">English</option>
+                  <option value="ja">Japanese</option>
+                  <option value="ko">Korean</option>
+                  <option value="zh">Chinese</option>
+                  <option value="fr">French</option>
+                  <option value="de">German</option>
+                  <option value="es">Spanish</option>
+                  <option value="th">Thai</option>
+                  <option value="id">Indonesian</option>
+                </select>
+              </div>
+            </div>
+            <label class="checkbox-option" style="margin-top:8px;">
+              <input type="checkbox" id="check-stream-a-tts" />
+              <span class="checkbox-label">Read aloud (TTS) — local speaker only</span>
+            </label>
+            <div class="slider-field" style="margin-top:8px;">
+              <span class="field-label">Stream A Translated Volume (Local)</span>
+              <input type="range" id="range-stream-a-translated-volume" min="0" max="200" step="5" />
+              <span id="stream-a-translated-volume-value" class="range-value"></span>
+            </div>
+            <div id="stream-a-tts-voice-edge" style="margin-top:8px;">
+              <div class="field">
+                <span class="field-label">Voice (Edge)</span>
+                <select id="select-stream-a-edge-voice">
+                  <option value="vi-VN-HoaiMyNeural">HoaiMy — Nữ 🇻🇳</option>
+                  <option value="vi-VN-NamMinhNeural">NamMinh — Nam 🇻🇳</option>
+                  <option value="en-US-JennyNeural">Jenny — Female 🇺🇸</option>
+                  <option value="en-US-GuyNeural">Guy — Male 🇺🇸</option>
+                  <option value="ja-JP-NanamiNeural">Nanami — 女性 🇯🇵</option>
+                  <option value="ko-KR-SunHiNeural">SunHi — 여성 🇰🇷</option>
+                  <option value="zh-CN-XiaoxiaoNeural">Xiaoxiao — 女声 🇨🇳</option>
+                </select>
+              </div>
+              <div class="slider-field" style="margin-top:8px;">
+                <span class="field-label">Speed (Edge)</span>
+                <input type="range" id="range-stream-a-edge-speed" min="-50" max="100" step="10" />
+                <span id="stream-a-edge-speed-value" class="range-value"></span>
+              </div>
+            </div>
+            <div id="stream-a-tts-voice-google" style="display:none;margin-top:8px;">
+              <div class="field">
+                <span class="field-label">Voice (Google)</span>
+                <select id="select-stream-a-google-voice">
+                  <optgroup label="🇻🇳 Vietnamese">
+                    <option value="vi-VN-Chirp3-HD-Aoede">Aoede — Nữ</option>
+                    <option value="vi-VN-Chirp3-HD-Kore">Kore — Nữ</option>
+                    <option value="vi-VN-Chirp3-HD-Leda">Leda — Nữ</option>
+                    <option value="vi-VN-Chirp3-HD-Charon">Charon — Nam</option>
+                    <option value="vi-VN-Chirp3-HD-Fenrir">Fenrir — Nam</option>
+                    <option value="vi-VN-Chirp3-HD-Puck">Puck — Nam</option>
+                  </optgroup>
+                  <optgroup label="🇺🇸 English">
+                    <option value="en-US-Chirp3-HD-Aoede">Aoede — Female</option>
+                    <option value="en-US-Chirp3-HD-Kore">Kore — Female</option>
+                    <option value="en-US-Chirp3-HD-Charon">Charon — Male</option>
+                    <option value="en-US-Chirp3-HD-Puck">Puck — Male</option>
+                  </optgroup>
+                  <optgroup label="🇯🇵 Japanese">
+                    <option value="ja-JP-Chirp3-HD-Aoede">Aoede — 女性</option>
+                    <option value="ja-JP-Chirp3-HD-Charon">Charon — 男性</option>
+                  </optgroup>
+                  <optgroup label="🇰🇷 Korean">
+                    <option value="ko-KR-Chirp3-HD-Aoede">Aoede — 여성</option>
+                    <option value="ko-KR-Chirp3-HD-Charon">Charon — 남성</option>
+                  </optgroup>
+                  <optgroup label="🇨🇳 Chinese">
+                    <option value="cmn-CN-Chirp3-HD-Aoede">Aoede — 女声</option>
+                    <option value="cmn-CN-Chirp3-HD-Charon">Charon — 男声</option>
+                  </optgroup>
+                </select>
+              </div>
+            </div>
+            <div id="stream-a-tts-voice-elevenlabs" style="display:none;margin-top:8px;">
+              <div class="field">
+                <span class="field-label">Voice (ElevenLabs)</span>
+                <select id="select-stream-a-elevenlabs-voice">
+                  <option value="21m00Tcm4TlvDq8ikWAM">Rachel — Female</option>
+                  <option value="EXAVITQu4vr4xnSDxMaL">Sarah — Female</option>
+                  <option value="onwK4e9ZLuTAKqWW03F9">Daniel — Male</option>
+                  <option value="pNInz6obpgDQGcFmaJgB">Adam — Male</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Stream B -->
+          <div class="settings-section">
+            <span class="field-label" style="color:#4ce87d;">Stream B — Microphone</span>
+            <div class="field-row" style="margin-top:6px;">
+              <div class="field">
+                <span class="field-label">Source</span>
+                <select id="select-stream-b-source">
+                  <option value="auto">Auto-detect</option>
+                  <option value="en">English</option>
+                  <option value="ja">Japanese</option>
+                  <option value="ko">Korean</option>
+                  <option value="zh">Chinese</option>
+                  <option value="fr">French</option>
+                  <option value="de">German</option>
+                  <option value="es">Spanish</option>
+                  <option value="vi">Vietnamese</option>
+                  <option value="th">Thai</option>
+                  <option value="id">Indonesian</option>
+                </select>
+              </div>
+              <div class="field">
+                <span class="field-label">Target</span>
+                <select id="select-stream-b-target">
+                  <option value="en">English</option>
+                  <option value="vi">Vietnamese</option>
+                  <option value="ja">Japanese</option>
+                  <option value="ko">Korean</option>
+                  <option value="zh">Chinese</option>
+                  <option value="fr">French</option>
+                  <option value="de">German</option>
+                  <option value="es">Spanish</option>
+                  <option value="th">Thai</option>
+                  <option value="id">Indonesian</option>
+                </select>
+              </div>
+            </div>
+            <label class="checkbox-option" style="margin-top:8px;">
+              <input type="checkbox" id="check-stream-b-tts" checked />
+              <span class="checkbox-label">Read aloud (TTS) — local speaker</span>
+            </label>
+            <div id="stream-b-tts-voice-edge" style="margin-top:8px;">
+              <div class="field">
+                <span class="field-label">Voice (Edge)</span>
+                <select id="select-stream-b-edge-voice">
+                  <option value="vi-VN-HoaiMyNeural">HoaiMy — Nữ 🇻🇳</option>
+                  <option value="vi-VN-NamMinhNeural">NamMinh — Nam 🇻🇳</option>
+                  <option value="en-US-JennyNeural">Jenny — Female 🇺🇸</option>
+                  <option value="en-US-GuyNeural">Guy — Male 🇺🇸</option>
+                  <option value="ja-JP-NanamiNeural">Nanami — 女性 🇯🇵</option>
+                  <option value="ko-KR-SunHiNeural">SunHi — 여성 🇰🇷</option>
+                  <option value="zh-CN-XiaoxiaoNeural">Xiaoxiao — 女声 🇨🇳</option>
+                </select>
+              </div>
+              <div class="slider-field" style="margin-top:8px;">
+                <span class="field-label">Speed (Edge)</span>
+                <input type="range" id="range-stream-b-edge-speed" min="-50" max="100" step="10" />
+                <span id="stream-b-edge-speed-value" class="range-value"></span>
+              </div>
+            </div>
+            <div id="stream-b-tts-voice-google" style="display:none;margin-top:8px;">
+              <div class="field">
+                <span class="field-label">Voice (Google)</span>
+                <select id="select-stream-b-google-voice">
+                  <optgroup label="🇻🇳 Vietnamese">
+                    <option value="vi-VN-Chirp3-HD-Aoede">Aoede — Nữ</option>
+                    <option value="vi-VN-Chirp3-HD-Kore">Kore — Nữ</option>
+                    <option value="vi-VN-Chirp3-HD-Leda">Leda — Nữ</option>
+                    <option value="vi-VN-Chirp3-HD-Charon">Charon — Nam</option>
+                    <option value="vi-VN-Chirp3-HD-Fenrir">Fenrir — Nam</option>
+                    <option value="vi-VN-Chirp3-HD-Puck">Puck — Nam</option>
+                  </optgroup>
+                  <optgroup label="🇺🇸 English">
+                    <option value="en-US-Chirp3-HD-Aoede">Aoede — Female</option>
+                    <option value="en-US-Chirp3-HD-Kore">Kore — Female</option>
+                    <option value="en-US-Chirp3-HD-Charon">Charon — Male</option>
+                    <option value="en-US-Chirp3-HD-Puck">Puck — Male</option>
+                  </optgroup>
+                  <optgroup label="🇯🇵 Japanese">
+                    <option value="ja-JP-Chirp3-HD-Aoede">Aoede — 女性</option>
+                    <option value="ja-JP-Chirp3-HD-Charon">Charon — 男性</option>
+                  </optgroup>
+                  <optgroup label="🇰🇷 Korean">
+                    <option value="ko-KR-Chirp3-HD-Aoede">Aoede — 여성</option>
+                    <option value="ko-KR-Chirp3-HD-Charon">Charon — 남성</option>
+                  </optgroup>
+                  <optgroup label="🇨🇳 Chinese">
+                    <option value="cmn-CN-Chirp3-HD-Aoede">Aoede — 女声</option>
+                    <option value="cmn-CN-Chirp3-HD-Charon">Charon — 男声</option>
+                  </optgroup>
+                </select>
+              </div>
+            </div>
+            <div id="stream-b-tts-voice-elevenlabs" style="display:none;margin-top:8px;">
+              <div class="field">
+                <span class="field-label">Voice (ElevenLabs)</span>
+                <select id="select-stream-b-elevenlabs-voice">
+                  <option value="21m00Tcm4TlvDq8ikWAM">Rachel — Female</option>
+                  <option value="EXAVITQu4vr4xnSDxMaL">Sarah — Female</option>
+                  <option value="onwK4e9ZLuTAKqWW03F9">Daniel — Male</option>
+                  <option value="pNInz6obpgDQGcFmaJgB">Adam — Male</option>
+                </select>
+              </div>
+            </div>
+            <label class="checkbox-option" style="margin-top:4px;">
+              <input type="checkbox" id="check-stream-b-inject" />
+              <span class="checkbox-label">Inject into virtual audio device (BlackHole)</span>
+            </label>
+            <label class="checkbox-option" style="margin-top:4px;">
+              <input type="checkbox" id="check-stream-b-mix-original" />
+              <span class="checkbox-label">Mix original mic with translated audio (for Meet input)</span>
+            </label>
+            <div class="slider-field" style="margin-top:8px;">
+              <span class="field-label">Stream B Original Mic Volume</span>
+              <input type="range" id="range-stream-b-original-volume" min="0" max="200" step="5" />
+              <span id="stream-b-original-volume-value" class="range-value"></span>
+            </div>
+            <div class="slider-field" style="margin-top:8px;">
+              <span class="field-label">Stream B Translated Volume (Inject)</span>
+              <input type="range" id="range-stream-b-translated-volume" min="0" max="200" step="5" />
+              <span id="stream-b-translated-volume-value" class="range-value"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Mixer -->
+      <div class="settings-tab-content" id="tab-mixer">
+        <div class="settings-section">
+          <div class="section-label">Smart Audio Mixer</div>
+          <label class="checkbox-option">
+            <input type="checkbox" id="check-mixer-enabled" checked />
+            <span class="checkbox-label">Enable Smart Ducking</span>
+          </label>
+          <p class="hint">Automatically reduces original audio volume when translated speech is playing</p>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-label">Ducking Level</div>
+          <div class="field-row">
+            <div class="field" style="flex:1;">
+              <input type="range" id="range-ducking-level" min="0" max="50" step="5" value="20" />
+            </div>
+            <span id="ducking-level-value" class="range-value" style="min-width:40px;text-align:right;">20%</span>
+          </div>
+          <p class="hint">Volume of original audio during translation (0% = mute, 50% = half volume)</p>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-label">Voice Activity Sensitivity</div>
+          <select id="select-vad-sensitivity" class="select-input">
+            <option value="low">Low — fewer detections (quiet environments)</option>
+            <option value="medium" selected>Medium — balanced</option>
+            <option value="high">High — more sensitive (noisy environments)</option>
+          </select>
+        </div>
+
+        <div class="settings-section" id="mixer-stats-section" style="display:none;">
+          <div class="section-label">Live Stats</div>
+          <div class="field-row" style="gap:16px; font-size:11px; color:var(--text-secondary);">
+            <span>Original: <b id="stat-orig-lufs">—</b> LUFS</span>
+            <span>Translated: <b id="stat-trans-lufs">—</b> LUFS</span>
+            <span>Gain: <b id="stat-gain">100</b>%</span>
+            <span id="stat-speech-badge" style="display:none; color:var(--accent);">● Speech</span>
           </div>
         </div>
       </div>

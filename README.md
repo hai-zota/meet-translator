@@ -112,6 +112,39 @@ Experimental offline mode using MLX + Whisper + Gemma — runs 100% on-device. J
 
 ---
 
+## Development & Debugging
+
+### Quick Start (VS Code on macOS)
+
+```bash
+# 1. Open project
+code /Users/x4hai/source/meet-translator
+
+# 2. Install extensions (Cmd+Shift+X)
+# - Tauri (tauri-apps.tauri-vscode)
+# - Rust-Analyzer (rust-lang.rust-analyzer)
+# - CodeLLDB (vadimcn.vscode-lldb)
+
+# 3. Start dev mode
+npm run tauri dev
+```
+
+### Debug Guides
+
+
+
+### Feature Development: Bidirectional Translation
+
+Implementing real-time bidirectional translation for online meetings (Zoom, Teams, Google Meet)?
+
+- 📚 **[Complete Implementation Guide](docs/bidirectional_translation_guide.md)** — Full technical specifications, architecture, and step-by-step setup
+- 🚀 **[Quick Start](docs/bidirectional_quickstart.md)** — Code examples and working implementation (ready to copy-paste)
+- 🔧 **[State Management](docs/bidirectional_state_management.md)** — State machine, data flows, error handling, and testing patterns
+- 🗺️ **[Roadmap & Navigation](docs/BIDIRECTIONAL_ROADMAP.md)** — Start here: document map, timeline, FAQ, success criteria
+- 🎯 **[Design Decisions](docs/bidirectional_design_decisions.md)** — Architecture options (Soniox vs Local), cost analysis, latency budget
+
+**Overview:** Simultaneously capture system audio (meeting) + microphone (user), translate both streams, inject user's translated audio back into the meeting via virtual audio device (BlackHole/Soundflower).
+
 ## Build from Source
 
 ```bash

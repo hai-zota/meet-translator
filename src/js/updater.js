@@ -6,7 +6,6 @@
 
 class Updater {
     constructor() {
-        this.updateAvailable = null;
         this.onUpdateFound = null; // callback(version, notes)
     }
 
@@ -38,8 +37,6 @@ class Updater {
 
             if (update) {
                 console.log(`[Updater] Update found: v${update.version}`);
-                this.updateAvailable = update;
-
                 if (this.onUpdateFound) {
                     this.onUpdateFound(update.version, update.body || '');
                 }
@@ -52,39 +49,6 @@ class Updater {
         }
     }
 
-    /**
-     * Download and install pending update
-     * @param {Function} onProgress - callback(downloaded, total)
-     */
-    async downloadAndInstall(onProgress) {
-        if (!this.updateAvailable) return;
-
-        try {
-            let downloaded = 0;
-            let contentLength = 0;
-
-            await this.updateAvailable.downloadAndInstall((event) => {
-                switch (event.event) {
-                    case 'Started':
-                        contentLength = event.data.contentLength || 0;
-                        console.log(`[Updater] Downloading ${contentLength} bytes...`);
-                        break;
-                    case 'Progress':
-                        downloaded += event.data.chunkLength;
-                        if (onProgress) onProgress(downloaded, contentLength);
-                        break;
-                    case 'Finished':
-                        console.log('[Updater] Download complete');
-                        break;
-                }
-            });
-
-            console.log('[Updater] Update installed, restarting...');
-        } catch (err) {
-            console.error('[Updater] Install failed:', err);
-            throw err;
-        }
-    }
 }
 
 export const updater = new Updater();

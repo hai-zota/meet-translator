@@ -19,6 +19,7 @@ class ElevenLabsTTS {
 
         // Queue text while WS is connecting
         this._textQueue = [];
+        this._pendingMetaQueue = [];
         this._reconnectAttempts = 0;
         this._maxReconnectAttempts = 3;
         this._intentionalClose = false;
@@ -86,6 +87,7 @@ class ElevenLabsTTS {
                 const data = JSON.parse(event.data);
 
                 if (data.audio && this.onAudioChunk) {
+                    const currentMeta = this._pendingMetaQueue[0] || null;
                     // Measure TTFB for first chunk of each request
                     const pendingKey = Object.keys(this._sendTimestamps)[0];
                     if (pendingKey && this._sendTimestamps[pendingKey]) {
@@ -102,7 +104,10 @@ class ElevenLabsTTS {
                     this._stats.chunks++;
                     this._stats.totalAudioBytes += data.audio.length * 0.75; // base64 -> bytes approx
 
-                    this.onAudioChunk(data.audio, data.isFinal || false);
+                    this.onAudioChunk(data.audio, data.isFinal || false, currentMeta);
+                    if (data.isFinal) {
+                        this._pendingMetaQueue.shift();
+                    }
                 }
 
                 if (data.error) {
@@ -146,14 +151,14 @@ class ElevenLabsTTS {
      * Send text to be spoken. Handles queueing if WS not ready.
      * @param {string} text - Text to speak
      */
-    speak(text) {
+    speak(text, meta = null) {
         if (!text?.trim()) return;
 
         if (this.isConnected && this.ws?.readyState === WebSocket.OPEN) {
-            this._sendText(text);
+            this._sendText(text, meta);
         } else {
             // Queue and connect if needed
-            this._textQueue.push(text);
+            this._textQueue.push({ text, meta });
             if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
                 this.connect();
             }
@@ -163,11 +168,12 @@ class ElevenLabsTTS {
     /**
      * Send text chunk to ElevenLabs
      */
-    _sendText(text) {
+    _sendText(text, meta = null) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
         // Record send timestamp for TTFB measurement
         this._sendTimestamps[text] = performance.now();
+        this._pendingMetaQueue.push(meta);
 
         this.ws.send(JSON.stringify({
             text: text + ' ',  // trailing space helps with prosody
@@ -180,8 +186,8 @@ class ElevenLabsTTS {
      */
     _flushQueue() {
         while (this._textQueue.length > 0) {
-            const text = this._textQueue.shift();
-            this._sendText(text);
+            const item = this._textQueue.shift();
+            this._sendText(item.text, item.meta);
         }
     }
 
@@ -191,6 +197,7 @@ class ElevenLabsTTS {
     disconnect() {
         this._intentionalClose = true;
         this._textQueue = [];
+        this._pendingMetaQueue = [];
 
         // Log stats before disconnect
         if (this._stats.requests > 0) {

@@ -18,6 +18,32 @@ pub struct CustomContext {
     pub translation_terms: Vec<TranslationTerm>,
 }
 
+/// Smart Audio Mixer & Ducking configuration
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct MixerSettings {
+    /// Enable smart ducking
+    pub enabled: bool,
+    /// Ducking level: 0.0 - 0.5 (how much to reduce original volume)
+    /// 0.2 = 20% (original becomes 20% volume when translated is playing)
+    pub ducking_level: f32,
+    /// VAD sensitivity: "low" | "medium" | "high"
+    pub vad_sensitivity: String,
+    /// Detection threshold in LUFS (-40.0 typical)
+    pub detection_threshold: f32,
+}
+
+impl Default for MixerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ducking_level: 0.2,
+            vad_sensitivity: "medium".to_string(),
+            detection_threshold: -40.0,
+        }
+    }
+}
+
 /// App settings — persisted to JSON
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -64,6 +90,36 @@ pub struct Settings {
     pub google_tts_voice: String,
     /// Google TTS speaking rate
     pub google_tts_speed: f64,
+    /// Whether dual mode (two streams) is enabled
+    pub dual_mode_enabled: bool,
+    /// Stream A (system audio) source language
+    pub stream_a_language_source: String,
+    /// Stream A target language
+    pub stream_a_language_target: String,
+    /// Stream A TTS enabled (plays to local speaker, default OFF)
+    pub stream_a_tts_enabled: bool,
+    /// Stream A translated-audio local playback volume (0.0 - 2.0)
+    pub stream_a_translated_volume: f64,
+    /// Stream B (microphone) source language
+    pub stream_b_language_source: String,
+    /// Stream B target language
+    pub stream_b_language_target: String,
+    /// Stream B TTS enabled
+    pub stream_b_tts_enabled: bool,
+    /// Stream B inject translation into virtual audio device (e.g. BlackHole)
+    pub stream_b_inject_enabled: bool,
+    /// Stream B mix original mic into injected output
+    pub stream_b_mix_original_enabled: bool,
+    /// Stream B original mic volume in injected mix (0.0 - 2.0)
+    pub stream_b_original_volume: f64,
+    /// Stream B translated audio volume in injected mix (0.0 - 2.0)
+    pub stream_b_translated_volume: f64,
+    /// Stream B Edge TTS voice (used for direct inject path)
+    pub stream_b_edge_tts_voice: String,
+    /// Stream B Edge TTS speed percentage (used for direct inject path)
+    pub stream_b_edge_tts_speed: i32,
+    /// Smart Audio Mixer & Ducking settings
+    pub mixer: MixerSettings,
 }
 
 impl Default for Settings {
@@ -90,6 +146,21 @@ impl Default for Settings {
             google_tts_api_key: String::new(),
             google_tts_voice: "vi-VN-Chirp3-HD-Aoede".to_string(),
             google_tts_speed: 1.0,
+            dual_mode_enabled: false,
+            stream_a_language_source: "auto".to_string(),
+            stream_a_language_target: "vi".to_string(),
+            stream_a_tts_enabled: false,
+            stream_a_translated_volume: 1.0,
+            stream_b_language_source: "auto".to_string(),
+            stream_b_language_target: "en".to_string(),
+            stream_b_tts_enabled: true,
+            stream_b_inject_enabled: false,
+            stream_b_mix_original_enabled: false,
+            stream_b_original_volume: 1.0,
+            stream_b_translated_volume: 1.0,
+            stream_b_edge_tts_voice: "vi-VN-HoaiMyNeural".to_string(),
+            stream_b_edge_tts_speed: 50,
+            mixer: MixerSettings::default(),
         }
     }
 }
@@ -123,11 +194,12 @@ impl Settings {
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {}", e))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config dir: {}", e))?;
         }
 
-        let json =
-            serde_json::to_string_pretty(self).map_err(|e| format!("Failed to serialize: {}", e))?;
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize: {}", e))?;
 
         fs::write(&path, json).map_err(|e| format!("Failed to write settings: {}", e))?;
 

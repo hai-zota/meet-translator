@@ -1,9 +1,9 @@
 /**
  * Transcript UI — continuous paragraph flow display with speaker diarization
- * 
+ *
  * Design: All text flows as one continuous paragraph.
  * - Translated text: white (primary color)
- * - Original text (pending translation): cyan/accent color  
+ * - Original text (pending translation): cyan/accent color
  * - Provisional text (being recognized): dimmed
  * - Speaker labels: shown when speaker changes (e.g. "Speaker 1:")
  */
@@ -21,6 +21,12 @@ export class TranscriptUI {
         this.provisionalText = '';
         this.provisionalSpeaker = null;
         this.currentSpeaker = null; // Track current speaker to detect changes
+
+        // Per-stream segment stores for dual bidirectional mode
+        this.segmentsA = []; // Stream A — system audio
+        this.segmentsB = []; // Stream B — microphone
+        this.provisionalA = { text: '', speaker: null };
+        this.provisionalB = { text: '', speaker: null };
     }
 
     /**
@@ -45,6 +51,56 @@ export class TranscriptUI {
             this._render();
         }
     }
+
+    // ─── Per-stream API (dual bidirectional mode) ──────────
+
+    /**
+     * Add finalized original text for a specific stream ('A' or 'B').
+     * Use this instead of addOriginal() when in dual mode.
+     */
+    addOriginalForStream(stream, text, speaker) {
+        this._removeListening();
+        const arr = stream === 'A' ? this.segmentsA : this.segmentsB;
+        arr.push({
+            original: text,
+            translation: null,
+            status: 'original',
+            speaker: speaker || null,
+            createdAt: Date.now(),
+        });
+        this._cleanupStaleOriginalsForStream(stream);
+        this._render();
+    }
+
+    /**
+     * Apply translation to the oldest untranslated segment in a specific stream.
+     */
+    addTranslationForStream(stream, text) {
+        const arr = stream === 'A' ? this.segmentsA : this.segmentsB;
+        const seg = arr.find(s => s.status === 'original');
+        if (seg) {
+            seg.translation = text;
+            seg.status = 'translated';
+        } else {
+            arr.push({ original: '', translation: text, status: 'translated', speaker: null });
+        }
+        this._render();
+    }
+
+    /**
+     * Update provisional (in-progress) text for a specific stream.
+     */
+    setProvisionalForStream(stream, text, speaker) {
+        this._removeListening();
+        if (stream === 'A') {
+            this.provisionalA = { text, speaker: speaker || null };
+        } else {
+            this.provisionalB = { text, speaker: speaker || null };
+        }
+        this._render();
+    }
+
+    // ─── Single-stream API ────────────────────────────────
 
     /**
      * Add finalized original text (pending translation)
@@ -185,12 +241,25 @@ export class TranscriptUI {
      */
     getPlainText() {
         let lines = [];
+        // Single-stream mode
         for (const seg of this.segments) {
             if (seg.original) lines.push(seg.original);
             if (seg.translation) lines.push(seg.translation);
             if (seg.original || seg.translation) lines.push('');
         }
         if (this.provisionalText) lines.push(this.provisionalText);
+        // Dual-stream mode
+        if (this.segmentsA.length > 0 || this.segmentsB.length > 0) {
+            lines.push('--- Stream A (System Audio) ---');
+            for (const seg of this.segmentsA) {
+                if (seg.translation) lines.push(seg.translation);
+            }
+            lines.push('');
+            lines.push('--- Stream B (Microphone) ---');
+            for (const seg of this.segmentsB) {
+                if (seg.translation) lines.push(seg.translation);
+            }
+        }
         return lines.join('\n').trim();
     }
 
@@ -198,7 +267,8 @@ export class TranscriptUI {
      * Get formatted content for saving to file (markdown with metadata)
      */
     getFormattedContent(metadata = {}) {
-        if (this.segments.length === 0) return null;
+        const isDual = this.segmentsA.length > 0 || this.segmentsB.length > 0;
+        if (this.segments.length === 0 && !isDual) return null;
 
         const lines = [];
 
@@ -206,20 +276,41 @@ export class TranscriptUI {
         lines.push('---');
         lines.push(`date: ${new Date().toISOString()}`);
         if (metadata.model) lines.push(`model: ${metadata.model}`);
-        if (metadata.sourceLang) lines.push(`source_language: ${metadata.sourceLang}`);
-        if (metadata.targetLang) lines.push(`target_language: ${metadata.targetLang}`);
+        if (isDual) {
+            lines.push('mode: dual_bidirectional');
+        } else {
+            if (metadata.sourceLang) lines.push(`source_language: ${metadata.sourceLang}`);
+            if (metadata.targetLang) lines.push(`target_language: ${metadata.targetLang}`);
+        }
         if (metadata.duration) lines.push(`recording_duration: ${metadata.duration}`);
-        if (metadata.audioSource) lines.push(`audio_source: ${metadata.audioSource}`);
-        lines.push(`segments: ${this.segments.length}`);
+        lines.push(`segments: ${this.segments.length + this.segmentsA.length + this.segmentsB.length}`);
         lines.push('---');
         lines.push('');
 
-        // Transcript entries
-        for (const seg of this.segments) {
-            if (seg.speaker) lines.push(`**Speaker ${seg.speaker}:**`);
-            if (seg.original) lines.push(`> ${seg.original}`);
-            if (seg.translation) lines.push(seg.translation);
+        if (isDual) {
+            lines.push('## Stream A — System Audio');
             lines.push('');
+            for (const seg of this.segmentsA) {
+                if (seg.speaker) lines.push(`**Speaker ${seg.speaker}:**`);
+                if (seg.original) lines.push(`> ${seg.original}`);
+                if (seg.translation) lines.push(seg.translation);
+                lines.push('');
+            }
+            lines.push('## Stream B — Microphone');
+            lines.push('');
+            for (const seg of this.segmentsB) {
+                if (seg.speaker) lines.push(`**Speaker ${seg.speaker}:**`);
+                if (seg.original) lines.push(`> ${seg.original}`);
+                if (seg.translation) lines.push(seg.translation);
+                lines.push('');
+            }
+        } else {
+            for (const seg of this.segments) {
+                if (seg.speaker) lines.push(`**Speaker ${seg.speaker}:**`);
+                if (seg.original) lines.push(`> ${seg.original}`);
+                if (seg.translation) lines.push(seg.translation);
+                lines.push('');
+            }
         }
 
         return lines.join('\n').trim();
@@ -229,7 +320,7 @@ export class TranscriptUI {
      * Check if there are segments to save
      */
     hasSegments() {
-        return this.segments.length > 0;
+        return this.segments.length > 0 || this.segmentsA.length > 0 || this.segmentsB.length > 0;
     }
 
     /**
@@ -238,8 +329,12 @@ export class TranscriptUI {
     clear() {
         this.container.innerHTML = '';
         this.segments = [];
+        this.segmentsA = [];
+        this.segmentsB = [];
         this.provisionalText = '';
         this.provisionalSpeaker = null;
+        this.provisionalA = { text: '', speaker: null };
+        this.provisionalB = { text: '', speaker: null };
         this.currentSpeaker = null;
         this.contentEl = null;
     }
@@ -307,33 +402,63 @@ export class TranscriptUI {
         const srcScrollState = oldSrcPanel ? this._getScrollState(oldSrcPanel) : { nearBottom: true, scrollTop: 0 };
         const tgtScrollState = oldTgtPanel ? this._getScrollState(oldTgtPanel) : { nearBottom: true, scrollTop: 0 };
 
+        const isDualBidir = this.segmentsA.length > 0 || this.segmentsB.length > 0
+            || this.provisionalA.text || this.provisionalB.text;
+
         let srcHtml = '';
         let tgtHtml = '';
-        let lastSpeaker = null;
 
-        for (const seg of this.segments) {
-            let speakerHtml = '';
-            if (seg.speaker && seg.speaker !== lastSpeaker) {
-                speakerHtml = `<div class="speaker-label">Speaker ${seg.speaker}:</div>`;
-                lastSpeaker = seg.speaker;
+        if (isDualBidir) {
+            // Bidirectional mode: left = Stream A translations, right = Stream B translations
+            srcHtml += `<div class="panel-label stream-a-label">🔊 Stream A</div>`;
+            tgtHtml += `<div class="panel-label stream-b-label">🎤 Stream B</div>`;
+
+            for (const seg of this.segmentsA) {
+                if (seg.status === 'translated' && seg.translation) {
+                    srcHtml += `<div class="seg-text">${this._esc(seg.translation)}</div>`;
+                } else if (seg.status === 'original') {
+                    srcHtml += `<div class="seg-text pending">...</div>`;
+                }
+            }
+            if (this.provisionalA.text) {
+                srcHtml += `<div class="seg-text pending">${this._esc(this.provisionalA.text)}</div>`;
             }
 
-            if (seg.status === 'translated' && seg.translation) {
-                srcHtml += speakerHtml;
-                srcHtml += `<div class="seg-text">${this._esc(seg.original || '')}</div>`;
-                tgtHtml += speakerHtml ? '<div class="speaker-label">&nbsp;</div>' : '';
-                tgtHtml += `<div class="seg-text">${this._esc(seg.translation)}</div>`;
-            } else if (seg.status === 'original' && seg.original) {
-                srcHtml += speakerHtml;
-                srcHtml += `<div class="seg-text pending">${this._esc(seg.original)}</div>`;
-                tgtHtml += speakerHtml ? '<div class="speaker-label">&nbsp;</div>' : '';
+            for (const seg of this.segmentsB) {
+                if (seg.status === 'translated' && seg.translation) {
+                    tgtHtml += `<div class="seg-text">${this._esc(seg.translation)}</div>`;
+                } else if (seg.status === 'original') {
+                    tgtHtml += `<div class="seg-text pending">...</div>`;
+                }
+            }
+            if (this.provisionalB.text) {
+                tgtHtml += `<div class="seg-text pending">${this._esc(this.provisionalB.text)}</div>`;
+            }
+        } else {
+            // Single-stream view: left = original, right = translation
+            let lastSpeaker = null;
+            for (const seg of this.segments) {
+                let speakerHtml = '';
+                if (seg.speaker && seg.speaker !== lastSpeaker) {
+                    speakerHtml = `<div class="speaker-label">Speaker ${seg.speaker}:</div>`;
+                    lastSpeaker = seg.speaker;
+                }
+                if (seg.status === 'translated' && seg.translation) {
+                    srcHtml += speakerHtml;
+                    srcHtml += `<div class="seg-text">${this._esc(seg.original || '')}</div>`;
+                    tgtHtml += speakerHtml ? '<div class="speaker-label">&nbsp;</div>' : '';
+                    tgtHtml += `<div class="seg-text">${this._esc(seg.translation)}</div>`;
+                } else if (seg.status === 'original' && seg.original) {
+                    srcHtml += speakerHtml;
+                    srcHtml += `<div class="seg-text pending">${this._esc(seg.original)}</div>`;
+                    tgtHtml += speakerHtml ? '<div class="speaker-label">&nbsp;</div>' : '';
+                    tgtHtml += `<div class="seg-text pending">...</div>`;
+                }
+            }
+            if (this.provisionalText) {
+                srcHtml += `<div class="seg-text pending">${this._esc(this.provisionalText)}</div>`;
                 tgtHtml += `<div class="seg-text pending">...</div>`;
             }
-        }
-
-        if (this.provisionalText) {
-            srcHtml += `<div class="seg-text pending">${this._esc(this.provisionalText)}</div>`;
-            tgtHtml += `<div class="seg-text pending">...</div>`;
         }
 
         this.contentEl.innerHTML = `
@@ -345,18 +470,12 @@ export class TranscriptUI {
         const srcPanel = this.contentEl.querySelector('.panel-source');
         const tgtPanel = this.contentEl.querySelector('.panel-translation');
         if (srcPanel) {
-            if (srcScrollState.nearBottom) {
-                srcPanel.scrollTop = srcPanel.scrollHeight;
-            } else {
-                srcPanel.scrollTop = srcScrollState.scrollTop;
-            }
+            if (srcScrollState.nearBottom) srcPanel.scrollTop = srcPanel.scrollHeight;
+            else srcPanel.scrollTop = srcScrollState.scrollTop;
         }
         if (tgtPanel) {
-            if (tgtScrollState.nearBottom) {
-                tgtPanel.scrollTop = tgtPanel.scrollHeight;
-            } else {
-                tgtPanel.scrollTop = tgtScrollState.scrollTop;
-            }
+            if (tgtScrollState.nearBottom) tgtPanel.scrollTop = tgtPanel.scrollHeight;
+            else tgtPanel.scrollTop = tgtScrollState.scrollTop;
         }
     }
 
@@ -375,6 +494,7 @@ export class TranscriptUI {
     }
 
     _trimSegments() {
+        // Single-stream
         let totalLen = 0;
         for (const seg of this.segments) {
             totalLen += (seg.translation || seg.original || '').length;
@@ -382,6 +502,20 @@ export class TranscriptUI {
         while (totalLen > this.maxChars && this.segments.length > 2) {
             const removed = this.segments.shift();
             totalLen -= (removed.translation || removed.original || '').length;
+        }
+        // Stream A
+        let lenA = 0;
+        for (const seg of this.segmentsA) lenA += (seg.translation || seg.original || '').length;
+        while (lenA > this.maxChars && this.segmentsA.length > 2) {
+            const removed = this.segmentsA.shift();
+            lenA -= (removed.translation || removed.original || '').length;
+        }
+        // Stream B
+        let lenB = 0;
+        for (const seg of this.segmentsB) lenB += (seg.translation || seg.original || '').length;
+        while (lenB > this.maxChars && this.segmentsB.length > 2) {
+            const removed = this.segmentsB.shift();
+            lenB -= (removed.translation || removed.original || '').length;
         }
     }
 
@@ -391,24 +525,31 @@ export class TranscriptUI {
      * - Max 3 pending originals allowed (oldest dropped)
      */
     _cleanupStaleOriginals() {
+        this._cleanupStaleArr(this.segments);
+    }
+
+    _cleanupStaleOriginalsForStream(stream) {
+        this._cleanupStaleArr(stream === 'A' ? this.segmentsA : this.segmentsB);
+    }
+
+    _cleanupStaleArr(arr) {
         const now = Date.now();
-        const STALE_MS = 10000; // 10 seconds
+        const STALE_MS = 10000;
         const MAX_PENDING = 3;
 
         // Remove originals older than STALE_MS
-        this.segments = this.segments.filter(seg => {
-            if (seg.status === 'original' && (now - seg.createdAt) > STALE_MS) {
-                return false; // drop stale
-            }
-            return true;
-        });
+        const kept = arr.filter(seg =>
+            !(seg.status === 'original' && (now - seg.createdAt) > STALE_MS)
+        );
+        arr.length = 0;
+        arr.push(...kept);
 
         // If still too many pending originals, drop oldest
-        let pending = this.segments.filter(s => s.status === 'original');
+        let pending = arr.filter(s => s.status === 'original');
         while (pending.length > MAX_PENDING) {
             const oldest = pending.shift();
-            const idx = this.segments.indexOf(oldest);
-            if (idx !== -1) this.segments.splice(idx, 1);
+            const idx = arr.indexOf(oldest);
+            if (idx !== -1) arr.splice(idx, 1);
         }
     }
 
