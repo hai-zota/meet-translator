@@ -30,6 +30,7 @@ class App {
         this.isPinned = true;     // Always-on-top state
         this.isCompact = false;   // Compact mode (hide control bar)
         this.dualModeEnabled = false; // Dual-stream mode runtime toggle
+        // Mixer stats polling removed
         this.dualConfig = {
             streamA: {
                 sourceLanguage: 'auto',
@@ -65,13 +66,6 @@ class App {
         this._lastInjectErrorTs = 0;
         this._injectFailureCount = 0;
         this._injectUsedLegacyFallback = false;
-        this._ttsCacheKey = null;
-        this._adaptiveTtsBoostPercent = 0;
-        this._ttsBackpressureHighWords = 24;
-        this._ttsBackpressureCriticalWords = 48;
-        this._ttsDroppedByBackpressure = 0;
-        this._ttsLastBacklogSampleTs = 0;
-        this._ttsLastBacklogWords = 0;
         this._injectTextQueue = [];
         this._isInjectingText = false;
         this._originalInjectQueue = [];
@@ -81,7 +75,6 @@ class App {
         this._dualStreamStates = { A: 'idle', B: 'idle' };
         this._dualStreamErrorHistory = { A: [], B: [] };
         this._lastStreamErrorToastTs = { A: 0, B: 0 };
-        this._mixerStatsPollTimer = null;
     }
 
     async init() {
@@ -98,7 +91,6 @@ class App {
         // Apply saved settings to UI
         this._applySettings(settingsManager.get());
         this._syncQuickLocaleControls(settingsManager.get());
-        this._setMixerStatsVisibility(false);
 
         // Bind event listeners
         this._bindEvents();
@@ -112,12 +104,18 @@ class App {
         // Init audio player for TTS
         audioPlayer.init();
 
-        // Wire TTS audio callbacks for providers that use audioPlayer
+        // Wire TTS audio callbacks for providers that use audioPlayer.
+        // Hot path: direct enqueue for single-mode (no async overhead)
         for (const tts of [elevenLabsTTS, edgeTTSRust, googleTTS]) {
             tts.onAudioChunk = (base64Audio, isFinal, meta) => {
-                this._handleTtsAudioChunk(base64Audio, meta).catch((err) => {
-                    console.error('[TTS] Failed to route audio chunk:', err);
-                });
+                if (meta) {
+                    this._handleTtsAudioChunk(base64Audio, meta).catch((err) => {
+                        console.error('[TTS] Failed to route audio chunk:', err);
+                    });
+                    return;
+                }
+                // Direct enqueue for single-mode: no .catch() overhead
+                audioPlayer.enqueue(base64Audio);
             };
         }
         for (const tts of [elevenLabsTTS, edgeTTSRust, googleTTS]) {
@@ -125,15 +123,12 @@ class App {
                 console.error('[TTS]', error);
                 this._showToast(error, 'error');
             };
-            tts.onStatusChange = (status) => {
-                // Optional: provider status hooks
-            };
         }
 
-        // Restore source buttons state
-        this._updateSourceButtons();
+        // Window position restore disabled — causes issues on Retina displays
+        // await this._restoreWindowPosition();
 
-        // Check for updates on startup
+        // Check for updates (non-blocking)
         this._checkForUpdates();
 
         console.log('🌐 My Translator v0.5.0 initialized');
@@ -487,7 +482,7 @@ class App {
 
         sonioxClient.onTranslation = (text) => {
             this.transcriptUI.addTranslation(text);
-            this._deferTts(() => this._speakIfEnabled(text));
+            this._speakIfEnabled(text);
         };
 
         sonioxClient.onProvisional = (text, speaker) => {
@@ -1267,7 +1262,6 @@ class App {
 
         try {
             await settingsManager.save(settings);
-            this._ttsCacheKey = null; // Invalidate TTS config cache after settings change
             await this._applySettingsRealtimeAfterSave(prevSettings, nextSettings);
             this._showToast('Settings saved', 'success');
             this._showView('overlay');
@@ -1341,54 +1335,8 @@ class App {
         this._updateDualModeButton();
 
         if (!this.isRunning) {
-            this._setMixerStatsVisibility(false);
+            // Mixer stats removed
         }
-    }
-
-    _setMixerStatsVisibility(visible) {
-        const statsSection = document.getElementById('mixer-stats-section');
-        if (statsSection) statsSection.style.display = visible ? '' : 'none';
-    }
-
-    _renderMixerStats(stats) {
-        const orig = document.getElementById('stat-orig-lufs');
-        const trans = document.getElementById('stat-trans-lufs');
-        const gain = document.getElementById('stat-gain');
-        const badge = document.getElementById('stat-speech-badge');
-
-        if (orig) orig.textContent = Number.isFinite(stats?.original_lufs) ? stats.original_lufs.toFixed(1) : '—';
-        if (trans) trans.textContent = Number.isFinite(stats?.translated_lufs) ? stats.translated_lufs.toFixed(1) : '—';
-        if (gain) {
-            const gainPct = Math.round(((stats?.ducking_gain ?? 1.0) * 100));
-            gain.textContent = `${gainPct}`;
-        }
-        if (badge) badge.style.display = stats?.is_speech ? '' : 'none';
-    }
-
-    _startMixerStatsPoll() {
-        this._stopMixerStatsPoll();
-        this._setMixerStatsVisibility(true);
-
-        this._mixerStatsPollTimer = setInterval(async () => {
-            if (!this.isRunning) return;
-
-            try {
-                const stats = await invoke('mixer_get_stats');
-                if (!stats) return;
-                this._renderMixerStats(stats);
-            } catch (err) {
-                console.warn('[Mixer] Stats poll failed:', err);
-            }
-        }, 500);
-    }
-
-    _stopMixerStatsPoll() {
-        if (this._mixerStatsPollTimer) {
-            clearInterval(this._mixerStatsPollTimer);
-            this._mixerStatsPollTimer = null;
-        }
-        this._setMixerStatsVisibility(false);
-        this._renderMixerStats(null);
     }
 
     // ─── TTS Control ──────────────────────────────────────
@@ -1437,97 +1385,11 @@ class App {
         return edgeTTSRust;
     }
 
-    _countWords(text) {
-        if (!text?.trim()) return 0;
-        return text.trim().split(/\s+/).filter(Boolean).length;
-    }
-
-    _getTtsBacklogWords(tts) {
-        if (!tts) return 0;
-
-        // Throttle sampling to keep translation hot path lightweight.
-        const now = Date.now();
-        if (now - this._ttsLastBacklogSampleTs < 180) {
-            return this._ttsLastBacklogWords;
-        }
-
-        const qA = Array.isArray(tts._queue) ? tts._queue : [];
-        const qB = Array.isArray(tts._textQueue) ? tts._textQueue : [];
-        const all = qA.concat(qB);
-
-        // Bound word counting cost: inspect first N items exactly,
-        // estimate remaining with average 6 words/item.
-        let words = 0;
-        const sampleLimit = Math.min(all.length, 8);
-        for (let i = 0; i < sampleLimit; i++) {
-            const item = all[i];
-            words += this._countWords(item?.text || '');
-        }
-        if (all.length > sampleLimit) {
-            words += (all.length - sampleLimit) * 6;
-        }
-
-        this._ttsLastBacklogSampleTs = now;
-        this._ttsLastBacklogWords = words;
-        return words;
-    }
-
-    _updateAdaptiveTtsBoostFromBacklog(delayedWords) {
-        // Rule: each delayed word adds +2% speed, max +100%.
-        this._adaptiveTtsBoostPercent = Math.min(100, delayedWords * 2);
-    }
-
-    _isLowValueTtsText(text) {
-        const t = (text || '').trim();
-        if (!t) return true;
-        const words = t.split(/\s+/).filter(Boolean);
-        if (words.length <= 3) return true;
-        const fillerOnly = /^(ờ|ừm|ừ|à|ơ|uh|um|er|ah|you know|bạn biết đấy|và|nhưng|mà|so|and|but)[\s,.;:!?-]*$/iu;
-        return fillerOnly.test(t);
-    }
-
-    _trimTtsProviderQueue(tts, keepItems = 2) {
-        let trimmed = 0;
-        if (Array.isArray(tts._queue) && tts._queue.length > keepItems) {
-            trimmed += (tts._queue.length - keepItems);
-            tts._queue = tts._queue.slice(-keepItems);
-        }
-        if (Array.isArray(tts._textQueue) && tts._textQueue.length > keepItems) {
-            trimmed += (tts._textQueue.length - keepItems);
-            tts._textQueue = tts._textQueue.slice(-keepItems);
-        }
-        return trimmed;
-    }
-
-    _applyTtsBackpressure(tts, text, delayedWords) {
-        // If backlog is high, drop low-value fragments to avoid falling further behind.
-        if (delayedWords >= this._ttsBackpressureHighWords && this._isLowValueTtsText(text)) {
-            this._ttsDroppedByBackpressure++;
-            if (this._ttsDroppedByBackpressure % 5 === 0) {
-                console.warn(`[TTSBackpressure] Dropped ${this._ttsDroppedByBackpressure} low-value chunks (backlogWords=${delayedWords})`);
-            }
-            return '';
-        }
-
-        // If backlog is critical, trim stale queue and keep only newest context.
-        if (delayedWords >= this._ttsBackpressureCriticalWords) {
-            const trimmed = this._trimTtsProviderQueue(tts, 2);
-            if (trimmed > 0) {
-                this._ttsDroppedByBackpressure += trimmed;
-                console.warn(`[TTSBackpressure] Trimmed ${trimmed} stale queued chunks (backlogWords=${delayedWords})`);
-            }
-        }
-
-        return text;
-    }
-
     _configureTTS(tts, settings, stream = null) {
         const provider = settings.tts_provider || 'edge';
         const cfg = stream === 'A' ? this.dualConfig.streamA
                   : stream === 'B' ? this.dualConfig.streamB
                   : null;
-        const boost = this._adaptiveTtsBoostPercent || 0;
-
         if (provider === 'elevenlabs') {
             tts.configure({
                 apiKey: settings.elevenlabs_api_key,
@@ -1536,21 +1398,17 @@ class App {
         } else if (provider === 'google') {
             const voice = cfg?.googleVoice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
             const langCode = voice.replace(/-Chirp3.*/, '');
-            const baseRate = settings.google_tts_speed || 1.0;
-            const effectiveRate = Math.max(0.25, Math.min(2.0, baseRate * (1 + boost / 100)));
             tts.configure({
                 apiKey: settings.google_tts_api_key,
                 voice: voice,
                 languageCode: langCode,
-                speakingRate: effectiveRate,
+                speakingRate: settings.google_tts_speed || 1.0,
             });
         } else {
-            const baseSpeed = cfg?.edgeSpeed !== undefined ? cfg.edgeSpeed
-                : (settings.edge_tts_speed !== undefined ? settings.edge_tts_speed : 20);
-            const effectiveSpeed = Math.max(-100, Math.min(100, baseSpeed + boost));
             tts.configure({
                 voice: cfg?.edgeVoice || settings.edge_tts_voice || 'vi-VN-HoaiMyNeural',
-                speed: effectiveSpeed,
+                speed: cfg?.edgeSpeed !== undefined ? cfg.edgeSpeed
+                     : (settings.edge_tts_speed !== undefined ? settings.edge_tts_speed : 20),
             });
         }
     }
@@ -1606,58 +1464,28 @@ class App {
     }
 
     _speakIfEnabled(text) {
-        if (this.ttsEnabled && text?.trim()) {
-            const stream = this.currentSource === 'system'
-                ? 'A'
-                : (this.currentSource === 'microphone' ? 'B' : 'single');
-            this._speakWithRouting(text, { stream, inject: false, playLocal: true });
-        }
-    }
+        if (!this.ttsEnabled || !text?.trim()) return;
 
-    _deferTts(task) {
-        // Let UI paint translated text first, then run TTS on a later macrotask.
-        requestAnimationFrame(() => {
-            setTimeout(() => {
-                try {
-                    task();
-                } catch (err) {
-                    console.error('[TTS] Deferred task failed:', err);
-                }
-            }, 0);
-        });
+        if (this.currentSource !== 'dual') {
+            this._getActiveTTS().speak(text);
+            return;
+        }
+
+        this._speakWithRouting(text, { stream: 'single', inject: false, playLocal: true });
     }
 
     _speakWithRouting(text, options = {}) {
         if (!text?.trim()) return;
+        const tts = this._getActiveTTS();
         const settings = settingsManager.get();
-        const provider = settings.tts_provider || 'edge';
-        const tts = provider === 'elevenlabs' ? elevenLabsTTS
-              : provider === 'google' ? googleTTS
-              : edgeTTSRust;
         const stream = options.stream;
-        const cfgStream = (stream === 'A' || stream === 'B') ? stream : null;
-        const delayedWords = this._getTtsBacklogWords(tts);
+        this._configureTTS(tts, settings, (stream === 'A' || stream === 'B') ? stream : null);
 
-        const speakText = this._applyTtsBackpressure(tts, text, delayedWords);
-        if (!speakText) return;
-
-        this._updateAdaptiveTtsBoostFromBacklog(delayedWords);
-
-        // Only reconfigure TTS when something actually changed (provider, voice, speed).
-        // Calling _configureTTS on every translation blocks the event loop unnecessarily.
-        const cacheKey = `${settings.tts_provider}|${settings.edge_tts_voice}|${settings.edge_tts_speed}|${settings.google_tts_voice}|${settings.google_tts_speed}|${settings.tts_voice_id}|${cfgStream}|boost:${this._adaptiveTtsBoostPercent}`;
-        if (this._ttsCacheKey !== cacheKey) {
-            this._configureTTS(tts, settings, cfgStream);
-            this._ttsCacheKey = cacheKey;
-        }
-
-        // Defensive: keep provider/session ready for single-mode narration as well.
         if (!tts.isConnected) {
             tts.connect?.();
         }
-        audioPlayer.resume();
 
-        tts.speak(speakText, options);
+        tts.speak(text, options);
     }
 
     async _handleTtsAudioChunk(base64Audio, meta) {
@@ -2141,8 +1969,6 @@ class App {
             await this._startSonioxMode(settings, runId);
         }
 
-        this._startMixerStatsPoll();
-
         // Start TTS if enabled
         if (this.ttsEnabled) {
             const tts = this._getActiveTTS();
@@ -2318,7 +2144,7 @@ class App {
                 setTimeout(() => {
                 if (data.translated) {
                     this.transcriptUI.addTranslation(data.translated);
-                    this._deferTts(() => this._speakIfEnabled(data.translated));
+                    this._speakIfEnabled(data.translated);
                 }
                 }, 80);
                 break;
@@ -2460,7 +2286,6 @@ class App {
         this.isRunning = false;
         this._dualStreamStates = { A: 'idle', B: 'idle' };
         this._updateStartButton();
-        this._stopMixerStatsPoll();
 
         // stop_capture covers both single and dual Rust-side captures
         try {
@@ -2720,7 +2545,7 @@ class App {
             if (!this._isRunActive(runId)) return;
             this.transcriptUI.addTranslationForStream('A', text);
             if (cfgA.ttsEnabled && text?.trim()) {
-                this._deferTts(() => this._speakWithRouting(text, { stream: 'A', inject: false, playLocal: true }));
+                this._speakWithRouting(text, { stream: 'A', inject: false, playLocal: true });
             }
         };
         this.sonioxClientA.onProvisional = (text, speaker) =>
@@ -2736,11 +2561,11 @@ class App {
             this.transcriptUI.addTranslationForStream('B', text);
             console.log('[DualB] translation received, tts=', cfgB.ttsEnabled, 'inject=', cfgB.injectEnabled);
             if (cfgB.ttsEnabled && text?.trim()) {
-                this._deferTts(() => this._speakWithRouting(text, {
+                this._speakWithRouting(text, {
                     stream: 'B',
                     inject: false,
                     playLocal: true,
-                }));
+                });
             }
 
             if (cfgB.injectEnabled && text?.trim()) {

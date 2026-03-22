@@ -1,7 +1,7 @@
 /**
  * Soniox WebSocket Client
  * Connects directly to wss://stt-rt.soniox.com/transcribe-websocket
- *
+ * 
  * Features:
  * - Auto-reconnect on transient errors
  * - Seamless session reset every SESSION_DURATION_MS (make-before-break)
@@ -189,15 +189,7 @@ export class SonioxClient {
 
             // Handle close codes
             if (event.code === 1000) {
-                // Server-initiated normal close (e.g. Soniox session end).
-                // Not a failure — reconnect immediately without burning the retry budget.
-                this._reconnectAttempts = 0;
-                setTimeout(() => {
-                    if (!this._intentionalDisconnect && this._config) {
-                        const carryover = this._getCarryoverContext();
-                        this._doConnect(this._config, carryover);
-                    }
-                }, 500);
+                this._setStatus('disconnected');
             } else if (event.code === 1006) {
                 this._tryReconnect('Connection lost unexpectedly');
             } else if (event.code === 4001 || event.code === 4003) {

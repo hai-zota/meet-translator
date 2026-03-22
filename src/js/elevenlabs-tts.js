@@ -19,12 +19,9 @@ class ElevenLabsTTS {
 
         // Queue text while WS is connecting
         this._textQueue = [];
-        this._pendingMetaQueue = [];
         this._reconnectAttempts = 0;
         this._maxReconnectAttempts = 3;
         this._intentionalClose = false;
-        this._maxQueueDepth = 0;
-        this._queueDepthAlertThreshold = 5;
 
         // Instrumentation
         this._sendTimestamps = {};  // text -> timestamp
@@ -89,7 +86,6 @@ class ElevenLabsTTS {
                 const data = JSON.parse(event.data);
 
                 if (data.audio && this.onAudioChunk) {
-                    const currentMeta = this._pendingMetaQueue[0] || null;
                     // Measure TTFB for first chunk of each request
                     const pendingKey = Object.keys(this._sendTimestamps)[0];
                     if (pendingKey && this._sendTimestamps[pendingKey]) {
@@ -106,10 +102,7 @@ class ElevenLabsTTS {
                     this._stats.chunks++;
                     this._stats.totalAudioBytes += data.audio.length * 0.75; // base64 -> bytes approx
 
-                    this.onAudioChunk(data.audio, data.isFinal || false, currentMeta);
-                    if (data.isFinal) {
-                        this._pendingMetaQueue.shift();
-                    }
+                    this.onAudioChunk(data.audio, data.isFinal || false);
                 }
 
                 if (data.error) {
@@ -153,18 +146,14 @@ class ElevenLabsTTS {
      * Send text to be spoken. Handles queueing if WS not ready.
      * @param {string} text - Text to speak
      */
-    speak(text, meta = null) {
+    speak(text) {
         if (!text?.trim()) return;
 
         if (this.isConnected && this.ws?.readyState === WebSocket.OPEN) {
-            this._sendText(text, meta);
+            this._sendText(text);
         } else {
             // Queue and connect if needed
-            this._textQueue.push({ text, meta });
-            if (this._textQueue.length > this._maxQueueDepth) this._maxQueueDepth = this._textQueue.length;
-            if (this._textQueue.length > this._queueDepthAlertThreshold) {
-                console.warn(`[ElevenLabs] Queue: ${this._textQueue.length} items (max: ${this._maxQueueDepth})`);
-            }
+            this._textQueue.push(text);
             if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
                 this.connect();
             }
@@ -174,12 +163,11 @@ class ElevenLabsTTS {
     /**
      * Send text chunk to ElevenLabs
      */
-    _sendText(text, meta = null) {
+    _sendText(text) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
         // Record send timestamp for TTFB measurement
         this._sendTimestamps[text] = performance.now();
-        this._pendingMetaQueue.push(meta);
 
         this.ws.send(JSON.stringify({
             text: text + ' ',  // trailing space helps with prosody
@@ -192,8 +180,8 @@ class ElevenLabsTTS {
      */
     _flushQueue() {
         while (this._textQueue.length > 0) {
-            const item = this._textQueue.shift();
-            this._sendText(item.text, item.meta);
+            const text = this._textQueue.shift();
+            this._sendText(text);
         }
     }
 
@@ -203,7 +191,6 @@ class ElevenLabsTTS {
     disconnect() {
         this._intentionalClose = true;
         this._textQueue = [];
-        this._pendingMetaQueue = [];
 
         // Log stats before disconnect
         if (this._stats.requests > 0) {

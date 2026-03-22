@@ -6,14 +6,12 @@
 class AudioPlayer {
     constructor() {
         this.audioContext = null;
-        this._queue = [];           // Queue of { buffer, gain }
+        this._queue = [];           // AudioBuffer queue
         this._isPlaying = false;
         this._nextStartTime = 0;
         this._enabled = true;
         this._currentSource = null; // Currently playing AudioBufferSourceNode
         this._maxQueueSize = 10;    // Max buffers in queue before dropping old ones
-        // Callback fired when playback state changes: (isPlaying: boolean) => void
-        this.onPlayStateChange = null;
     }
 
     /**
@@ -38,9 +36,8 @@ class AudioPlayer {
     /**
      * Enqueue a base64-encoded audio chunk for playback.
      * @param {string} base64Audio - base64-encoded MP3 data
-     * @param {number} gain - linear gain multiplier (0.0 - 2.0)
      */
-    async enqueue(base64Audio, gain = 1.0) {
+    async enqueue(base64Audio) {
         if (!this._enabled || !this.audioContext || !base64Audio) return;
 
         // Ensure context is running
@@ -64,10 +61,7 @@ class AudioPlayer {
                 console.warn(`[AudioPlayer] Dropped ${dropped} stale audio buffer(s)`);
             }
 
-            this._queue.push({
-                buffer: audioBuffer,
-                gain: Number.isFinite(gain) ? Math.max(0, Math.min(2, gain)) : 1.0,
-            });
+            this._queue.push(audioBuffer);
             this._scheduleNext();
         } catch (e) {
             // Small/empty chunks may fail to decode — that's OK
@@ -91,26 +85,19 @@ class AudioPlayer {
             return;
         }
 
-        const item = this._queue.shift();
-        const buffer = item.buffer;
-        const gainValue = item.gain;
+        const buffer = this._queue.shift();
         const source = this.audioContext.createBufferSource();
-        const gainNode = this.audioContext.createGain();
         source.buffer = buffer;
-        gainNode.gain.value = gainValue;
-        source.connect(gainNode);
-        gainNode.connect(this.audioContext.destination);
+        source.connect(this.audioContext.destination);
 
         // Schedule seamlessly after previous chunk
         const currentTime = this.audioContext.currentTime;
         const startTime = Math.max(currentTime, this._nextStartTime);
 
-        const wasPlaying = this._isPlaying;
         source.start(startTime);
         this._nextStartTime = startTime + buffer.duration;
         this._currentSource = source;
         this._isPlaying = true;
-        if (!wasPlaying) this.onPlayStateChange?.(true);
 
         source.onended = () => {
             if (this._queue.length > 0) {
@@ -118,7 +105,6 @@ class AudioPlayer {
             } else {
                 this._isPlaying = false;
                 this._currentSource = null;
-                this.onPlayStateChange?.(false);
             }
         };
     }
@@ -145,7 +131,6 @@ class AudioPlayer {
             this.audioContext.close().catch(() => {});
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         }
-        this.onPlayStateChange?.(false);
     }
 
     /**

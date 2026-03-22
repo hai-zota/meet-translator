@@ -15,7 +15,6 @@ const DEFAULT_SETTINGS = {
   max_lines: 5,
   show_original: true,
   translation_mode: 'soniox',
-  soniox_max_endpoint_delay_ms: 1200,
   custom_context: null,
   elevenlabs_api_key: '',
   tts_enabled: false,

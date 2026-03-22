@@ -27,9 +27,6 @@ class GoogleTTS {
         this.isConnected = false;
         this._queue = [];
         this._isSpeaking = false;
-        this._logCounter = 0;
-        this._maxQueueDepth = 0;
-        this._queueDepthAlertThreshold = 5;
 
         // Same callback interface as other TTS providers
         this.onAudioChunk = null;
@@ -65,13 +62,9 @@ class GoogleTTS {
         console.log('[Google TTS] Ready (Chirp 3 HD)');
     }
 
-    speak(text, meta = null) {
+    speak(text) {
         if (!text?.trim()) return;
-        this._queue.push({ text: text.trim(), meta });
-        if (this._queue.length > this._maxQueueDepth) this._maxQueueDepth = this._queue.length;
-        if (this._queue.length > this._queueDepthAlertThreshold) {
-            console.warn(`[Google TTS] Queue: ${this._queue.length} items (max: ${this._maxQueueDepth})`);
-        }
+        this._queue.push(text.trim());
         if (!this._isSpeaking) {
             this._processQueue();
         }
@@ -84,9 +77,7 @@ class GoogleTTS {
         }
 
         this._isSpeaking = true;
-        const entry = this._queue.shift();
-        const text = entry?.text || '';
-        const meta = entry?.meta || null;
+        const text = this._queue.shift();
         const startTime = performance.now();
 
         try {
@@ -114,13 +105,10 @@ class GoogleTTS {
 
             const data = await response.json();
             const elapsed = performance.now() - startTime;
-            this._logCounter++;
-            if (elapsed >= 1800 || this._logCounter % 10 === 0) {
-                console.log(`[Google TTS] Audio received in ${elapsed.toFixed(0)}ms`);
-            }
+            console.log(`[Google TTS] Audio received in ${elapsed.toFixed(0)}ms`);
 
             if (data.audioContent && this.onAudioChunk) {
-                this.onAudioChunk(data.audioContent, true, meta);
+                this.onAudioChunk(data.audioContent, true);
             }
         } catch (err) {
             console.error('[Google TTS] Error:', err);
@@ -131,11 +119,9 @@ class GoogleTTS {
     }
 
     disconnect() {
-        if (this._queue.length > 0) console.warn(`[Google TTS] Disconnect: ${this._queue.length} items in queue`);
         this._queue = [];
         this._isSpeaking = false;
         this.isConnected = false;
-        this._maxQueueDepth = 0;
         this._setStatus('disconnected');
     }
 
