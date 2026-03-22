@@ -71,6 +71,8 @@ class App {
         this._originalInjectQueue = [];
         this._translatedInjectQueue = [];
         this._isPumpRunning = false;
+        this._ttsTextQueue = [];      // Decoupled TTS text queue
+        this._ttsQueuePumping = false; // Whether TTS pump loop is active
         this._runId = 0; // Incremented on each start/stop to invalidate stale callbacks
         this._dualStreamStates = { A: 'idle', B: 'idle' };
         this._dualStreamErrorHistory = { A: [], B: [] };
@@ -1465,27 +1467,69 @@ class App {
 
     _speakIfEnabled(text) {
         if (!this.ttsEnabled || !text?.trim()) return;
-
-        if (this.currentSource !== 'dual') {
-            this._getActiveTTS().speak(text);
-            return;
-        }
-
-        this._speakWithRouting(text, { stream: 'single', inject: false, playLocal: true });
+        const stream = this.currentSource === 'dual' ? null : 'single';
+        this._enqueueTtsText(text.trim(), { stream: stream || 'single', inject: false, playLocal: true });
     }
 
     _speakWithRouting(text, options = {}) {
         if (!text?.trim()) return;
-        const tts = this._getActiveTTS();
-        const settings = settingsManager.get();
-        const stream = options.stream;
-        this._configureTTS(tts, settings, (stream === 'A' || stream === 'B') ? stream : null);
+        this._enqueueTtsText(text.trim(), options);
+    }
 
-        if (!tts.isConnected) {
-            tts.connect?.();
+    /**
+     * Push translated text into the TTS queue. Does NOT call TTS directly.
+     * The independent pump loop will process it later.
+     */
+    _enqueueTtsText(text, options) {
+        this._ttsTextQueue.push({ text, options });
+        // Cap queue to prevent unbounded growth
+        if (this._ttsTextQueue.length > 30) {
+            this._ttsTextQueue.splice(0, this._ttsTextQueue.length - 20);
         }
+        this._scheduleTtsPump();
+    }
 
-        tts.speak(text, options);
+    /**
+     * Schedule the TTS pump on the next event-loop turn, fully decoupled
+     * from the Soniox/translation callback chain.
+     */
+    _scheduleTtsPump() {
+        if (this._ttsQueuePumping) return;
+        this._ttsQueuePumping = true;
+        setTimeout(() => this._runTtsPump(), 0);
+    }
+
+    /**
+     * Async pump: processes TTS queue items one by one.
+     * Runs independently of audio capture and Soniox callbacks.
+     */
+    async _runTtsPump() {
+        try {
+            while (this._ttsTextQueue.length > 0 && this.isRunning) {
+                const { text, options } = this._ttsTextQueue.shift();
+                if (!this.ttsEnabled && !(options?.bypassGlobalToggle)) continue;
+
+                const tts = this._getActiveTTS();
+                const settings = settingsManager.get();
+                const stream = options?.stream;
+                this._configureTTS(tts, settings, (stream === 'A' || stream === 'B') ? stream : null);
+
+                if (!tts.isConnected) {
+                    tts.connect?.();
+                }
+
+                tts.speak(text, options);
+
+                // Yield to event loop between items so audio callbacks are never starved
+                await new Promise(r => setTimeout(r, 0));
+            }
+        } finally {
+            this._ttsQueuePumping = false;
+            // If new items arrived while we were processing, restart
+            if (this._ttsTextQueue.length > 0 && this.isRunning) {
+                this._scheduleTtsPump();
+            }
+        }
     }
 
     async _handleTtsAudioChunk(base64Audio, meta) {
@@ -2329,6 +2373,8 @@ class App {
         this._originalInjectQueue = [];
         this._translatedInjectQueue = [];
         this._isPumpRunning = false;
+        this._ttsTextQueue = [];
+        this._ttsQueuePumping = false;
 
         audioPlayer.stop();
 

@@ -5,6 +5,7 @@ mod settings;
 use audio::microphone::MicCapture;
 use audio::mixer::SmartMixer;
 use audio::{SystemAudioCapture, TARGET_SAMPLE_RATE};
+use audio::tts_player::{TtsPlayer, TtsPlayerState};
 use commands::audio::AudioState;
 use commands::local_pipeline::LocalPipelineState;
 use commands::mixer::MixerState;
@@ -52,6 +53,9 @@ pub fn run() {
         .manage(LocalPipelineState {
             process: Mutex::new(None),
         })
+        .manage(TtsPlayerState {
+            player: Mutex::new(TtsPlayer::new()),
+        })
         .invoke_handler(tauri::generate_handler![
             commands::settings::get_settings,
             commands::settings::save_settings,
@@ -74,6 +78,8 @@ pub fn run() {
             commands::mixer::mixer_update_settings,
             commands::mixer::mixer_get_stats,
             commands::mixer::mixer_reset,
+            commands::tts_player::play_tts_audio,
+            commands::tts_player::stop_tts_audio,
             get_platform_info,
         ])
         .run(tauri::generate_context!())

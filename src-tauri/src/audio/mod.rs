@@ -1,5 +1,6 @@
 pub mod microphone;
 pub mod mixer;
+pub mod tts_player;
 
 #[cfg(target_os = "macos")]
 pub mod system_audio;
