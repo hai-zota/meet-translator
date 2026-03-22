@@ -27,6 +27,7 @@ class App {
         this.localPipelineReady = false;
         this.recordingStartTime = null;
         this.ttsEnabled = false;  // TTS runtime toggle
+        this._initialSettingsApplied = false;
         this.isPinned = true;     // Always-on-top state
         this.isCompact = false;   // Compact mode (hide control bar)
         this.dualModeEnabled = false; // Dual-stream mode runtime toggle
@@ -73,6 +74,8 @@ class App {
         this._isPumpRunning = false;
         this._ttsTextQueue = [];      // Decoupled TTS text queue
         this._ttsQueuePumping = false; // Whether TTS pump loop is active
+        this._ttsPumpToken = 0;       // Invalidate stale pump loops across mode switches
+        this._ttsPumpHeartbeat = 0;   // Last observed pump activity timestamp
         this._runId = 0; // Incremented on each start/stop to invalidate stale callbacks
         this._dualStreamStates = { A: 'idle', B: 'idle' };
         this._dualStreamErrorHistory = { A: [], B: [] };
@@ -1196,7 +1199,7 @@ class App {
         settings.google_tts_api_key = document.getElementById('input-google-tts-key')?.value.trim() || '';
         settings.google_tts_voice = document.getElementById('select-google-voice')?.value || 'vi-VN-Chirp3-HD-Aoede';
         settings.google_tts_speed = parseFloat(document.getElementById('range-google-speed')?.value || 1.0);
-        settings.tts_enabled = false;
+        settings.tts_enabled = this.ttsEnabled;
 
         // Dual mode settings
         settings.audio_source = settings.audio_source === 'both' ? 'dual' : settings.audio_source;
@@ -1292,7 +1295,11 @@ class App {
         this.currentSource = settings.audio_source === 'both' ? 'dual' : (settings.audio_source || 'system');
         this._updateSourceButtons();
 
-        // Keep runtime TTS toggle state unchanged when settings are updated.
+        // Restore persisted global TTS toggle on first settings application.
+        if (!this._initialSettingsApplied) {
+            this.ttsEnabled = settings.tts_enabled === true;
+            this._initialSettingsApplied = true;
+        }
         this._updateTTSButton();
 
         // Sync dualConfig from persisted settings
@@ -1361,6 +1368,11 @@ class App {
 
         this.ttsEnabled = !this.ttsEnabled;
         this._updateTTSButton();
+
+        // Persist global single-stream toggle so system/microphone stay consistent.
+        settingsManager.save({ tts_enabled: this.ttsEnabled }).catch((err) => {
+            console.warn('[Settings] Failed to persist tts_enabled:', err);
+        });
 
         const tts = this._getActiveTTS();
 
@@ -1494,20 +1506,38 @@ class App {
      * from the Soniox/translation callback chain.
      */
     _scheduleTtsPump() {
+        const now = Date.now();
+        // Recover from stale pump state after source switching/restart races.
+        if (
+            this._ttsQueuePumping &&
+            this._ttsPumpHeartbeat > 0 &&
+            (now - this._ttsPumpHeartbeat) > 3000
+        ) {
+            console.warn('[TTS] Pump appears stalled; resetting queue pump state');
+            this._resetTtsQueueState({ clearQueue: false });
+        }
+
         if (this._ttsQueuePumping) return;
         this._ttsQueuePumping = true;
-        setTimeout(() => this._runTtsPump(), 0);
+        this._ttsPumpHeartbeat = now;
+        const token = this._ttsPumpToken;
+        setTimeout(() => this._runTtsPump(token), 0);
     }
 
     /**
      * Async pump: processes TTS queue items one by one.
      * Runs independently of audio capture and Soniox callbacks.
      */
-    async _runTtsPump() {
+    async _runTtsPump(token) {
+        if (token !== this._ttsPumpToken) return;
+
         try {
             while (this._ttsTextQueue.length > 0 && this.isRunning) {
+                if (token !== this._ttsPumpToken) break;
                 const { text, options } = this._ttsTextQueue.shift();
                 if (!this.ttsEnabled && !(options?.bypassGlobalToggle)) continue;
+
+                this._ttsPumpHeartbeat = Date.now();
 
                 const tts = this._getActiveTTS();
                 const settings = settingsManager.get();
@@ -1524,11 +1554,22 @@ class App {
                 await new Promise(r => setTimeout(r, 0));
             }
         } finally {
+            if (token !== this._ttsPumpToken) return;
             this._ttsQueuePumping = false;
+            this._ttsPumpHeartbeat = 0;
             // If new items arrived while we were processing, restart
             if (this._ttsTextQueue.length > 0 && this.isRunning) {
                 this._scheduleTtsPump();
             }
+        }
+    }
+
+    _resetTtsQueueState({ clearQueue = false } = {}) {
+        this._ttsPumpToken += 1;
+        this._ttsQueuePumping = false;
+        this._ttsPumpHeartbeat = 0;
+        if (clearQueue) {
+            this._ttsTextQueue = [];
         }
     }
 
@@ -1930,9 +1971,16 @@ class App {
             ? 'System Audio'
             : (source === 'microphone' ? 'Microphone' : 'Dual Conversation');
 
+        // Persist so that _applySettings (triggered by any future save) restores the correct source.
+        const settingsSource = source === 'dual' ? 'both' : source;
+        settingsManager.save({ audio_source: settingsSource }).catch((err) => {
+            console.warn('[Settings] Failed to persist audio_source:', err);
+        });
+
         // If currently running, restart with new source
         if (wasRunning) {
             this.stop().then(() => {
+                this._resetTtsQueueState({ clearQueue: true });
                 this.currentSource = source;
                 this.dualModeEnabled = source === 'dual';
                 this.transcriptUI.configure({ viewMode: source === 'dual' ? 'dual' : 'single' });
@@ -2373,8 +2421,7 @@ class App {
         this._originalInjectQueue = [];
         this._translatedInjectQueue = [];
         this._isPumpRunning = false;
-        this._ttsTextQueue = [];
-        this._ttsQueuePumping = false;
+        this._resetTtsQueueState({ clearQueue: true });
 
         audioPlayer.stop();
 
