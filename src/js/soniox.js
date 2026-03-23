@@ -39,6 +39,8 @@ export class SonioxClient {
         this._lastTransientNotifyTs = 0;
         this._lastNoTranslationSig = '';
         this._lastNoTranslationTs = 0;
+        this._activeProvisionalText = '';
+        this._activeProvisionalSpeaker = null;
 
         // Callbacks
         this.onOriginal = null;       // (text, speaker) => {}
@@ -63,6 +65,8 @@ export class SonioxClient {
         this._clearReconnectTimer();
         this._lastNoTranslationSig = '';
         this._lastNoTranslationTs = 0;
+        this._activeProvisionalText = '';
+        this._activeProvisionalSpeaker = null;
 
         if (!apiKey) {
             this._setStatus('error');
@@ -270,6 +274,33 @@ export class SonioxClient {
         let provisionalText = '';
         let hasEnd = false;
         let speaker = null;
+        let detectedSpeaker = null;
+
+        // If speaker changed while previous speaker still has pending provisional text,
+        // flush the old provisional as finalized transcript to avoid UI being stuck.
+        for (const token of data.tokens) {
+            if (token.text === '<end>') continue;
+            if (
+                token.speaker &&
+                (token.translation_status === 'original' || token.translation_status === 'none')
+            ) {
+                detectedSpeaker = token.speaker;
+                break;
+            }
+        }
+
+        if (
+            detectedSpeaker &&
+            this._activeProvisionalSpeaker &&
+            this._activeProvisionalSpeaker !== detectedSpeaker &&
+            this._activeProvisionalText?.trim()
+        ) {
+            const pending = this._activeProvisionalText.trim();
+            this.onOriginal?.(pending, this._activeProvisionalSpeaker);
+            this.onProvisional?.('');
+            this._activeProvisionalText = '';
+            this._activeProvisionalSpeaker = null;
+        }
 
         for (const token of data.tokens) {
             if (token.text === '<end>') {
@@ -327,8 +358,12 @@ export class SonioxClient {
         // Emit provisional text with speaker
         if (provisionalText.trim()) {
             this.onProvisional?.(provisionalText, speaker);
+            this._activeProvisionalText = provisionalText;
+            this._activeProvisionalSpeaker = speaker || detectedSpeaker || this._activeProvisionalSpeaker;
         } else if (originalText.trim() || translationText.trim() || hasEnd) {
             this.onProvisional?.('');
+            this._activeProvisionalText = '';
+            this._activeProvisionalSpeaker = null;
         }
     }
 
