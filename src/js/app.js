@@ -566,14 +566,19 @@ class App {
         if (quickMyLang) {
             quickMyLang.addEventListener('change', async (e) => {
                 try {
-                    const settings = settingsManager.get();
+                    const currentSettings = settingsManager.get();
+                    const settings = { ...currentSettings };
                     const value = e.target.value;
                     const voiceStream = this.currentSource === 'dual' ? 'A' : 'single';
+                    const patch = {};
                     if (this.currentSource === 'dual') {
                         settings.stream_a_language_target = value;
+                        patch.stream_a_language_target = value;
                     } else {
                         settings.target_language = value;
                         settings.stream_a_language_target = value;
+                        patch.target_language = value;
+                        patch.stream_a_language_target = value;
                     }
 
                     const streamATarget = document.getElementById('select-stream-a-target');
@@ -585,7 +590,8 @@ class App {
                     const voiceChanged = this._syncDefaultVoiceForStream(settings, 'A', voiceStream);
                     this._syncQuickLocaleControls(settings);
 
-                    await settingsManager.save(settings);
+                    Object.assign(patch, this._getQuickVoicePatchFromSettings(settings, voiceStream));
+                    await settingsManager.save(patch);
                     await this._applyQuickRealtimeChanges({
                         languageChanged: true,
                         voiceChanged,
@@ -600,13 +606,15 @@ class App {
         if (quickMyVoice) {
             quickMyVoice.addEventListener('change', async (e) => {
                 try {
-                    const settings = settingsManager.get();
-                    this._setQuickVoiceInSettings(settings, this.currentSource === 'dual' ? 'A' : 'single', e.target.value);
-                    await settingsManager.save(settings);
+                    const currentSettings = settingsManager.get();
+                    const settings = { ...currentSettings };
+                    const voiceStream = this.currentSource === 'dual' ? 'A' : 'single';
+                    this._setQuickVoiceInSettings(settings, voiceStream, e.target.value);
+                    await settingsManager.save(this._getQuickVoicePatchFromSettings(settings, voiceStream));
                     await this._applyQuickRealtimeChanges({
                         languageChanged: false,
                         voiceChanged: true,
-                        stream: this.currentSource === 'dual' ? 'A' : 'single',
+                        stream: voiceStream,
                     });
                 } catch (err) {
                     console.error('[QuickControls] Failed to save My Voice:', err);
@@ -617,8 +625,12 @@ class App {
         if (quickMeetingLang) {
             quickMeetingLang.addEventListener('change', async (e) => {
                 try {
-                    const settings = settingsManager.get();
+                    const currentSettings = settingsManager.get();
+                    const settings = { ...currentSettings };
                     settings.stream_b_language_target = e.target.value;
+                    const patch = {
+                        stream_b_language_target: e.target.value,
+                    };
 
                     const streamBTarget = document.getElementById('select-stream-b-target');
                     if (streamBTarget) streamBTarget.value = settings.stream_b_language_target;
@@ -627,7 +639,8 @@ class App {
                     const voiceChanged = this._syncDefaultVoiceForStream(settings, 'B', 'B');
                     this._syncQuickLocaleControls(settings);
 
-                    await settingsManager.save(settings);
+                    Object.assign(patch, this._getQuickVoicePatchFromSettings(settings, 'B'));
+                    await settingsManager.save(patch);
                     await this._applyQuickRealtimeChanges({
                         languageChanged: true,
                         voiceChanged,
@@ -642,9 +655,10 @@ class App {
         if (quickMeetingVoice) {
             quickMeetingVoice.addEventListener('change', async (e) => {
                 try {
-                    const settings = settingsManager.get();
+                    const currentSettings = settingsManager.get();
+                    const settings = { ...currentSettings };
                     this._setQuickVoiceInSettings(settings, 'B', e.target.value);
-                    await settingsManager.save(settings);
+                    await settingsManager.save(this._getQuickVoicePatchFromSettings(settings, 'B'));
                     await this._applyQuickRealtimeChanges({
                         languageChanged: false,
                         voiceChanged: true,
@@ -743,6 +757,58 @@ class App {
         }
     }
 
+    _getQuickVoicePatchFromSettings(settings, stream) {
+        const provider = settings?.tts_provider || 'edge';
+        if (provider === 'google') {
+            if (stream === 'B') {
+                return {
+                    stream_b_google_tts_voice: settings.stream_b_google_tts_voice,
+                };
+            }
+            if (stream === 'A') {
+                return {
+                    stream_a_google_tts_voice: settings.stream_a_google_tts_voice,
+                };
+            }
+            return {
+                google_tts_voice: settings.google_tts_voice,
+                stream_a_google_tts_voice: settings.stream_a_google_tts_voice,
+            };
+        }
+
+        if (provider === 'elevenlabs') {
+            if (stream === 'B') {
+                return {
+                    stream_b_elevenlabs_voice_id: settings.stream_b_elevenlabs_voice_id,
+                };
+            }
+            if (stream === 'A') {
+                return {
+                    stream_a_elevenlabs_voice_id: settings.stream_a_elevenlabs_voice_id,
+                };
+            }
+            return {
+                tts_voice_id: settings.tts_voice_id,
+                stream_a_elevenlabs_voice_id: settings.stream_a_elevenlabs_voice_id,
+            };
+        }
+
+        if (stream === 'B') {
+            return {
+                stream_b_edge_tts_voice: settings.stream_b_edge_tts_voice,
+            };
+        }
+        if (stream === 'A') {
+            return {
+                stream_a_edge_tts_voice: settings.stream_a_edge_tts_voice,
+            };
+        }
+        return {
+            edge_tts_voice: settings.edge_tts_voice,
+            stream_a_edge_tts_voice: settings.stream_a_edge_tts_voice,
+        };
+    }
+
     _getQuickVoiceFromSettings(settings, stream) {
         const provider = settings.tts_provider || 'edge';
         if (provider === 'google') {
@@ -826,11 +892,12 @@ class App {
         const firstVisible = this._firstVisibleVoiceValue(selectEl);
         if (!firstVisible) return false;
 
-        const selectedValid = Array.from(selectEl.options || []).some(
-            (opt) => opt.value === selectEl.value && !opt.hidden && !opt.disabled
+        const requestedVoice = this._getQuickVoiceFromSettings(settings, settingsStream);
+        const requestedValid = Array.from(selectEl.options || []).some(
+            (opt) => opt.value === requestedVoice && !opt.hidden && !opt.disabled
         );
-        const nextVoice = selectedValid ? selectEl.value : firstVisible;
-        const prevVoice = this._getQuickVoiceFromSettings(settings, settingsStream);
+        const nextVoice = requestedValid ? requestedVoice : firstVisible;
+        const prevVoice = requestedVoice;
         selectEl.value = nextVoice;
         this._setQuickVoiceInSettings(settings, settingsStream, nextVoice);
         return prevVoice !== nextVoice;
@@ -960,6 +1027,11 @@ class App {
     async _applyQuickRealtimeChanges({ languageChanged = false, voiceChanged = false, stream = 'single' } = {}) {
         const settings = settingsManager.get();
 
+        // Quick controls save to settings first, but realtime handlers below still
+        // read from in-memory dualConfig. Sync the latest language/voice fields so
+        // TTS and Soniox reconnect use the newly selected values immediately.
+        this._syncRuntimeConfigFromSettings(settings, stream);
+
         if (voiceChanged && this.ttsEnabled) {
             const tts = this._getActiveTTS();
             const routeStream = (stream === 'A' || stream === 'B') ? stream : null;
@@ -1004,6 +1076,49 @@ class App {
             customContext: settings.custom_context,
         });
         this._showToast('Updated translation language in realtime', 'info');
+    }
+
+    _syncRuntimeConfigFromSettings(settings, stream = 'single') {
+        if (!settings || !this.dualConfig) return;
+
+        const syncStream = (streamKey) => {
+            const cfg = streamKey === 'B' ? this.dualConfig.streamB : this.dualConfig.streamA;
+            if (!cfg) return;
+
+            if (streamKey === 'B') {
+                cfg.sourceLanguage = settings.stream_b_language_source || cfg.sourceLanguage || 'auto';
+                cfg.targetLanguage = settings.stream_b_language_target || cfg.targetLanguage || 'en';
+            } else {
+                cfg.sourceLanguage = settings.stream_a_language_source || settings.source_language || cfg.sourceLanguage || 'auto';
+                cfg.targetLanguage = settings.stream_a_language_target || settings.target_language || cfg.targetLanguage || 'vi';
+            }
+
+            cfg.edgeVoice = streamKey === 'B'
+                ? (settings.stream_b_edge_tts_voice || settings.edge_tts_voice || cfg.edgeVoice || 'vi-VN-HoaiMyNeural')
+                : (settings.stream_a_edge_tts_voice || settings.edge_tts_voice || cfg.edgeVoice || 'vi-VN-HoaiMyNeural');
+            cfg.edgeSpeed = streamKey === 'B'
+                ? (settings.stream_b_edge_tts_speed ?? settings.edge_tts_speed ?? cfg.edgeSpeed ?? 20)
+                : (settings.stream_a_edge_tts_speed ?? settings.edge_tts_speed ?? cfg.edgeSpeed ?? 20);
+
+            cfg.googleVoice = streamKey === 'B'
+                ? (settings.stream_b_google_tts_voice || settings.google_tts_voice || cfg.googleVoice || 'vi-VN-Chirp3-HD-Aoede')
+                : (settings.stream_a_google_tts_voice || settings.google_tts_voice || cfg.googleVoice || 'vi-VN-Chirp3-HD-Aoede');
+            cfg.googleSpeed = streamKey === 'B'
+                ? (settings.stream_b_google_tts_speed ?? settings.google_tts_speed ?? cfg.googleSpeed ?? 1.0)
+                : (settings.stream_a_google_tts_speed ?? settings.google_tts_speed ?? cfg.googleSpeed ?? 1.0);
+
+            cfg.elevenLabsVoiceId = streamKey === 'B'
+                ? (settings.stream_b_elevenlabs_voice_id || settings.tts_voice_id || cfg.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM')
+                : (settings.stream_a_elevenlabs_voice_id || settings.tts_voice_id || cfg.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM');
+        };
+
+        if (stream === 'B') {
+            syncStream('B');
+            return;
+        }
+
+        // 'A' and single mode quick controls map to stream A config.
+        syncStream('A');
     }
 
     async _applySettingsRealtimeAfterSave(prev, next) {
