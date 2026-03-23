@@ -36,7 +36,7 @@ class App {
             streamA: {
                 sourceLanguage: 'auto',
                 targetLanguage: 'vi',
-                ttsEnabled: false,
+                ttsEnabled: true,
                 translatedVolume: 1.0,
                 edgeVoice: 'vi-VN-HoaiMyNeural',
                 edgeSpeed: 20,
@@ -367,7 +367,13 @@ class App {
                 document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
                 document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.remove('active'));
                 tab.classList.add('active');
-                document.getElementById(tab.dataset.tab)?.classList.add('active');
+                const tabTargets = (tab.dataset.tab || '')
+                    .split(',')
+                    .map((t) => t.trim())
+                    .filter(Boolean);
+                tabTargets.forEach((targetId) => {
+                    document.getElementById(targetId)?.classList.add('active');
+                });
             });
         });
 
@@ -377,48 +383,31 @@ class App {
             if (detail) detail.style.display = e.target.checked ? '' : 'none';
         });
 
-        // Dual mode checkbox — show/hide stream config and sync source radio
-        document.getElementById('check-dual-mode')?.addEventListener('change', (e) => {
-            const config = document.getElementById('dual-mode-config');
-            if (config) config.style.display = e.target.checked ? '' : 'none';
-
-            const dualRadio = document.querySelector('input[name="audio-source"][value="dual"]');
-            const systemRadio = document.querySelector('input[name="audio-source"][value="system"]');
-            if (e.target.checked) {
-                if (dualRadio) dualRadio.checked = true;
-            } else if (dualRadio?.checked && systemRadio) {
-                systemRadio.checked = true;
-            }
-        });
-
-        // Audio source radio — keep dual checkbox synced
-        document.querySelectorAll('input[name="audio-source"]').forEach((radio) => {
-            radio.addEventListener('change', () => {
-                const selected = document.querySelector('input[name="audio-source"]:checked')?.value || 'system';
-                const checkDual = document.getElementById('check-dual-mode');
-                const dualConfig = document.getElementById('dual-mode-config');
-                const isDual = selected === 'dual';
-                if (checkDual) checkDual.checked = isDual;
-                if (dualConfig) dualConfig.style.display = isDual ? '' : 'none';
-            });
-        });
-
         // TTS provider toggle — show/hide relevant settings panels
         document.getElementById('select-tts-provider')?.addEventListener('change', (e) => {
             this._updateTTSProviderUI(e.target.value);
+            this._syncTranslationVoiceOptions(settingsManager.get());
+        });
+
+        // Translation target language changes should auto-select/filter voices.
+        document.getElementById('select-stream-a-target')?.addEventListener('change', () => {
+            this._syncTranslationVoiceOptions(settingsManager.get());
+        });
+        document.getElementById('select-stream-b-target')?.addEventListener('change', () => {
+            this._syncTranslationVoiceOptions(settingsManager.get());
+        });
+
+        document.getElementById('check-stream-b-inject')?.addEventListener('change', () => {
+            this._syncInjectMixerControls();
+        });
+        document.getElementById('check-stream-b-mix-original')?.addEventListener('change', () => {
+            this._syncInjectMixerControls();
         });
 
         // TTS speed slider — show value
         document.getElementById('range-tts-speed')?.addEventListener('input', (e) => {
             const label = document.getElementById('tts-speed-value');
             if (label) label.textContent = e.target.value + 'x';
-        });
-
-        // Edge TTS speed slider
-        document.getElementById('range-edge-speed')?.addEventListener('input', (e) => {
-            const label = document.getElementById('edge-speed-value');
-            const v = parseInt(e.target.value);
-            if (label) label.textContent = (v >= 0 ? '+' : '') + v + '%';
         });
 
         // Stream B inject voice speed slider
@@ -452,12 +441,6 @@ class App {
             const v = parseInt(e.target.value, 10);
             if (label) label.textContent = `${v}%`;
         });
-
-        document.getElementById('range-google-speed')?.addEventListener('input', (e) => {
-            const label = document.getElementById('google-speed-value');
-            if (label) label.textContent = parseFloat(e.target.value).toFixed(1) + 'x';
-        });
-
 
         // Ducking level slider
         document.getElementById('range-ducking-level')?.addEventListener('input', (e) => {
@@ -526,6 +509,7 @@ class App {
                         settings.stream_a_language_target = value;
                     } else {
                         settings.target_language = value;
+                        settings.stream_a_language_target = value;
                     }
                     await settingsManager.save(settings);
                     await this._applyQuickRealtimeChanges({
@@ -663,15 +647,24 @@ class App {
         if (provider === 'google') {
             if (stream === 'A') settings.stream_a_google_tts_voice = voiceValue;
             else if (stream === 'B') settings.stream_b_google_tts_voice = voiceValue;
-            else settings.google_tts_voice = voiceValue;
+            else {
+                settings.google_tts_voice = voiceValue;
+                settings.stream_a_google_tts_voice = voiceValue;
+            }
         } else if (provider === 'elevenlabs') {
             if (stream === 'A') settings.stream_a_elevenlabs_voice_id = voiceValue;
             else if (stream === 'B') settings.stream_b_elevenlabs_voice_id = voiceValue;
-            else settings.tts_voice_id = voiceValue;
+            else {
+                settings.tts_voice_id = voiceValue;
+                settings.stream_a_elevenlabs_voice_id = voiceValue;
+            }
         } else {
             if (stream === 'A') settings.stream_a_edge_tts_voice = voiceValue;
             else if (stream === 'B') settings.stream_b_edge_tts_voice = voiceValue;
-            else settings.edge_tts_voice = voiceValue;
+            else {
+                settings.edge_tts_voice = voiceValue;
+                settings.stream_a_edge_tts_voice = voiceValue;
+            }
         }
     }
 
@@ -680,16 +673,98 @@ class App {
         if (provider === 'google') {
             if (stream === 'A') return settings.stream_a_google_tts_voice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
             if (stream === 'B') return settings.stream_b_google_tts_voice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
-            return settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+            return settings.stream_a_google_tts_voice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
         }
         if (provider === 'elevenlabs') {
             if (stream === 'A') return settings.stream_a_elevenlabs_voice_id || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
             if (stream === 'B') return settings.stream_b_elevenlabs_voice_id || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
-            return settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
+            return settings.stream_a_elevenlabs_voice_id || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
         }
         if (stream === 'A') return settings.stream_a_edge_tts_voice || settings.edge_tts_voice || 'vi-VN-HoaiMyNeural';
         if (stream === 'B') return settings.stream_b_edge_tts_voice || settings.edge_tts_voice || 'vi-VN-HoaiMyNeural';
-        return settings.edge_tts_voice || 'vi-VN-HoaiMyNeural';
+        return settings.stream_a_edge_tts_voice || settings.edge_tts_voice || 'vi-VN-HoaiMyNeural';
+    }
+
+    _voicePrefixesForLanguage(provider, targetLanguage) {
+        if (!targetLanguage) return [];
+        if (provider === 'edge') {
+            const map = {
+                vi: ['vi-VN-'],
+                en: ['en-US-'],
+                ja: ['ja-JP-'],
+                ko: ['ko-KR-'],
+                zh: ['zh-CN-'],
+            };
+            return map[targetLanguage] || [];
+        }
+        if (provider === 'google') {
+            const map = {
+                vi: ['vi-VN-'],
+                en: ['en-US-'],
+                ja: ['ja-JP-'],
+                ko: ['ko-KR-'],
+                zh: ['cmn-CN-', 'zh-CN-'],
+            };
+            return map[targetLanguage] || [];
+        }
+        return [];
+    }
+
+    _filterVoiceSelectByLanguage(selectEl, provider, targetLanguage) {
+        if (!selectEl) return;
+        const prefixes = this._voicePrefixesForLanguage(provider, targetLanguage);
+        const options = Array.from(selectEl.options || []);
+
+        // ElevenLabs voices are not language-coded in this UI; keep all visible.
+        if (provider === 'elevenlabs') {
+            options.forEach((opt) => {
+                opt.hidden = false;
+                opt.disabled = false;
+            });
+            return;
+        }
+
+        // No matching voice for this language/provider in curated list.
+        if (prefixes.length === 0) {
+            options.forEach((opt) => {
+                opt.hidden = true;
+                opt.disabled = true;
+            });
+            return;
+        }
+
+        let firstVisibleValue = null;
+        options.forEach((opt) => {
+            const visible = prefixes.some((prefix) => (opt.value || '').startsWith(prefix));
+            opt.hidden = !visible;
+            opt.disabled = !visible;
+            if (visible && firstVisibleValue === null) {
+                firstVisibleValue = opt.value;
+            }
+        });
+
+        const selectedVisible = options.some((opt) => opt.value === selectEl.value && !opt.hidden && !opt.disabled);
+        if (!selectedVisible && firstVisibleValue) {
+            selectEl.value = firstVisibleValue;
+        }
+    }
+
+    _syncTranslationVoiceOptions(settings) {
+        const provider = settings?.tts_provider || settingsManager.get().tts_provider || 'edge';
+        const langA = document.getElementById('select-stream-a-target')?.value
+            || settings?.stream_a_language_target
+            || settings?.target_language
+            || 'vi';
+        const langB = document.getElementById('select-stream-b-target')?.value
+            || settings?.stream_b_language_target
+            || 'en';
+
+        this._filterVoiceSelectByLanguage(document.getElementById('select-stream-a-edge-voice'), 'edge', langA);
+        this._filterVoiceSelectByLanguage(document.getElementById('select-stream-b-edge-voice'), 'edge', langB);
+        this._filterVoiceSelectByLanguage(document.getElementById('select-stream-a-google-voice'), 'google', langA);
+        this._filterVoiceSelectByLanguage(document.getElementById('select-stream-b-google-voice'), 'google', langB);
+        this._filterVoiceSelectByLanguage(document.getElementById('select-stream-a-elevenlabs-voice'), provider, langA);
+        this._filterVoiceSelectByLanguage(document.getElementById('select-stream-b-elevenlabs-voice'), provider, langB);
     }
 
     _syncQuickLocaleControls(settings) {
@@ -704,24 +779,29 @@ class App {
         const streamBTarget = document.getElementById('select-stream-b-target');
 
         const provider = settings.tts_provider || 'edge';
-        const voiceSource = provider === 'google'
-            ? document.getElementById('select-google-voice')
-            : (provider === 'elevenlabs'
-                ? document.getElementById('select-tts-voice')
-                : document.getElementById('select-edge-voice'));
+        const getVoiceSource = (stream) => {
+            if (provider === 'google') {
+                return document.getElementById(stream === 'B' ? 'select-stream-b-google-voice' : 'select-stream-a-google-voice');
+            }
+            if (provider === 'elevenlabs') {
+                return document.getElementById(stream === 'B' ? 'select-stream-b-elevenlabs-voice' : 'select-stream-a-elevenlabs-voice');
+            }
+            return document.getElementById(stream === 'B' ? 'select-stream-b-edge-voice' : 'select-stream-a-edge-voice');
+        };
 
         if (quickMyLang) {
-            this._setOptionsFromSource(quickMyLang, this.currentSource === 'dual' ? streamATarget : sourceTarget);
+            const quickSourceTarget = this.currentSource === 'dual' ? streamATarget : (sourceTarget || streamATarget);
+            this._setOptionsFromSource(quickMyLang, quickSourceTarget);
             this._decorateQuickLanguageOptions(quickMyLang);
             this._bindQuickLanguageSelectBehavior(quickMyLang);
             quickMyLang.value = this.currentSource === 'dual'
                 ? (settings.stream_a_language_target || 'vi')
-                : (settings.target_language || 'vi');
+                : (settings.target_language || settings.stream_a_language_target || 'vi');
             this._renderQuickLanguageCollapsed(quickMyLang);
         }
 
         if (quickMyVoice) {
-            this._setOptionsFromSource(quickMyVoice, voiceSource);
+            this._setOptionsFromSource(quickMyVoice, getVoiceSource(this.currentSource === 'dual' ? 'A' : 'A'));
             quickMyVoice.value = this._getQuickVoiceFromSettings(settings, this.currentSource === 'dual' ? 'A' : 'single');
         }
 
@@ -736,7 +816,7 @@ class App {
                 this._renderQuickLanguageCollapsed(quickMeetingLang);
             }
             if (quickMeetingVoice) {
-                this._setOptionsFromSource(quickMeetingVoice, voiceSource);
+                this._setOptionsFromSource(quickMeetingVoice, getVoiceSource('B'));
                 quickMeetingVoice.value = this._getQuickVoiceFromSettings(settings, 'B');
             }
         }
@@ -1007,15 +1087,12 @@ class App {
         const s = settingsManager.get();
 
         document.getElementById('input-api-key').value = s.soniox_api_key || '';
-        document.getElementById('select-source-lang').value = s.source_language || 'auto';
-        document.getElementById('select-target-lang').value = s.target_language || 'vi';
+        const singleSource = document.getElementById('select-source-lang');
+        if (singleSource) singleSource.value = s.source_language || 'auto';
+        const singleTarget = document.getElementById('select-target-lang');
+        if (singleTarget) singleTarget.value = s.target_language || 'vi';
         document.getElementById('select-translation-mode').value = s.translation_mode || 'soniox';
         this._updateModeUI(s.translation_mode || 'soniox');
-
-        // Audio source radio
-        const radioValue = s.audio_source === 'both' ? 'dual' : (s.audio_source || 'system');
-        const radio = document.querySelector(`input[name="audio-source"][value="${radioValue}"]`);
-        if (radio) radio.checked = true;
 
         // Display
         const opacityPercent = Math.round((s.overlay_opacity || 0.85) * 100);
@@ -1043,26 +1120,9 @@ class App {
 
         // TTS settings
         document.getElementById('input-elevenlabs-key').value = s.elevenlabs_api_key || '';
-        document.getElementById('select-tts-voice').value = s.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
-        // Edge TTS settings
-        const edgeVoiceSelect = document.getElementById('select-edge-voice');
-        if (edgeVoiceSelect) edgeVoiceSelect.value = s.edge_tts_voice || 'vi-VN-HoaiMyNeural';
-        const edgeSpeedSlider = document.getElementById('range-edge-speed');
-        const edgeSpeedLabel = document.getElementById('edge-speed-value');
-        const edgeSpeed = s.edge_tts_speed !== undefined ? s.edge_tts_speed : 20;
-        if (edgeSpeedSlider) edgeSpeedSlider.value = edgeSpeed;
-        if (edgeSpeedLabel) edgeSpeedLabel.textContent = (edgeSpeed >= 0 ? '+' : '') + edgeSpeed + '%';
-
         // Google TTS settings
         const googleKeyInput = document.getElementById('input-google-tts-key');
         if (googleKeyInput) googleKeyInput.value = s.google_tts_api_key || '';
-        const googleVoiceSelect = document.getElementById('select-google-voice');
-        if (googleVoiceSelect) googleVoiceSelect.value = s.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
-        const googleSpeedSlider = document.getElementById('range-google-speed');
-        const googleSpeedLabel = document.getElementById('google-speed-value');
-        const googleSpeed = s.google_tts_speed || 1.0;
-        if (googleSpeedSlider) googleSpeedSlider.value = googleSpeed;
-        if (googleSpeedLabel) googleSpeedLabel.textContent = googleSpeed + 'x';
 
         // TTS provider
         const providerSelect = document.getElementById('select-tts-provider');
@@ -1072,18 +1132,16 @@ class App {
         }
 
         // Dual mode settings
-        const checkDual = document.getElementById('check-dual-mode');
-        if (checkDual) {
-            checkDual.checked = radioValue === 'dual' || s.dual_mode_enabled || false;
-            const config = document.getElementById('dual-mode-config');
-            if (config) config.style.display = checkDual.checked ? '' : 'none';
-        }
         const selStreamASrc = document.getElementById('select-stream-a-source');
         if (selStreamASrc) selStreamASrc.value = s.stream_a_language_source || 'auto';
         const selStreamATgt = document.getElementById('select-stream-a-target');
         if (selStreamATgt) selStreamATgt.value = s.stream_a_language_target || 'vi';
         const checkStreamATts = document.getElementById('check-stream-a-tts');
-        if (checkStreamATts) checkStreamATts.checked = s.stream_a_tts_enabled || false;
+        if (checkStreamATts) {
+            checkStreamATts.checked = this.ttsEnabled;
+            checkStreamATts.disabled = true;
+            checkStreamATts.title = 'Controlled by Header TTS toggle';
+        }
         const streamATranslatedVolume = Number.isFinite(s.stream_a_translated_volume)
             ? s.stream_a_translated_volume
             : 1.0;
@@ -1145,6 +1203,7 @@ class App {
         if (streamBGoogleVoice) streamBGoogleVoice.value = s.stream_b_google_tts_voice || s.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
         const streamBElevenLabsVoice = document.getElementById('select-stream-b-elevenlabs-voice');
         if (streamBElevenLabsVoice) streamBElevenLabsVoice.value = s.stream_b_elevenlabs_voice_id || s.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
+        this._syncTranslationVoiceOptions(s);
         // Mixer settings
         const mixerCfg = s.mixer || {};
         const mixerEnabled = document.getElementById('check-mixer-enabled');
@@ -1156,16 +1215,46 @@ class App {
         if (duckingLabel) duckingLabel.textContent = `${duckingPct}%`;
         const vadSelect = document.getElementById('select-vad-sensitivity');
         if (vadSelect) vadSelect.value = mixerCfg.vad_sensitivity || 'medium';
+        this._syncInjectMixerControls();
+    }
+
+    _syncInjectMixerControls() {
+        const checkInject = document.getElementById('check-stream-b-inject');
+        const checkMixOriginal = document.getElementById('check-stream-b-mix-original');
+
+        const injectEnabled = checkInject?.checked === true;
+        if (checkMixOriginal) {
+            if (!injectEnabled) {
+                checkMixOriginal.checked = false;
+            }
+            checkMixOriginal.disabled = !injectEnabled;
+        }
+
+        const mixOriginalEnabled = checkMixOriginal?.checked === true;
+
+        const mixerEnabled = document.getElementById('check-mixer-enabled');
+        const duckingSlider = document.getElementById('range-ducking-level');
+        const vadSelect = document.getElementById('select-vad-sensitivity');
+        const mixerStats = document.getElementById('mixer-stats-section');
+
+        if (mixerEnabled) {
+            if (!mixOriginalEnabled) mixerEnabled.checked = false;
+            mixerEnabled.disabled = !mixOriginalEnabled;
+        }
+        if (duckingSlider) duckingSlider.disabled = !mixOriginalEnabled;
+        if (vadSelect) vadSelect.disabled = !mixOriginalEnabled;
+        if (mixerStats) mixerStats.style.opacity = mixOriginalEnabled ? '1' : '0.5';
     }
 
     async _saveSettingsFromForm() {
         const prevSettings = settingsManager.get();
         const settings = {
             soniox_api_key: document.getElementById('input-api-key').value.trim(),
-            source_language: document.getElementById('select-source-lang').value,
-            target_language: document.getElementById('select-target-lang').value,
+            source_language: document.getElementById('select-stream-a-source')?.value || document.getElementById('select-source-lang')?.value || 'auto',
+            target_language: document.getElementById('select-stream-a-target')?.value || document.getElementById('select-target-lang')?.value || 'vi',
             translation_mode: document.getElementById('select-translation-mode').value,
-            audio_source: document.querySelector('input[name="audio-source"]:checked')?.value || 'system',
+            // Audio source is controlled from overlay buttons, not settings.
+            audio_source: this.currentSource,
             overlay_opacity: parseInt(document.getElementById('range-opacity').value) / 100,
             font_size: parseInt(document.getElementById('range-font-size').value),
             max_lines: parseInt(document.getElementById('range-max-lines').value),
@@ -1192,21 +1281,30 @@ class App {
         // TTS settings
         settings.tts_provider = document.getElementById('select-tts-provider')?.value || 'edge';
         settings.elevenlabs_api_key = document.getElementById('input-elevenlabs-key').value.trim();
-        settings.tts_voice_id = document.getElementById('select-tts-voice').value;
-        settings.edge_tts_voice = document.getElementById('select-edge-voice')?.value || 'vi-VN-HoaiMyNeural';
-        settings.edge_tts_speed = parseInt(document.getElementById('range-edge-speed')?.value || 20);
+        settings.tts_voice_id = document.getElementById('select-stream-a-elevenlabs-voice')?.value
+            || prevSettings.stream_a_elevenlabs_voice_id
+            || prevSettings.tts_voice_id
+            || '21m00Tcm4TlvDq8ikWAM';
+        settings.edge_tts_voice = document.getElementById('select-stream-a-edge-voice')?.value
+            || prevSettings.stream_a_edge_tts_voice
+            || prevSettings.edge_tts_voice
+            || 'vi-VN-HoaiMyNeural';
+        settings.edge_tts_speed = prevSettings.edge_tts_speed !== undefined ? prevSettings.edge_tts_speed : 20;
         settings.tts_speed = parseFloat(document.getElementById('range-tts-speed')?.value || 1.2);
         settings.google_tts_api_key = document.getElementById('input-google-tts-key')?.value.trim() || '';
-        settings.google_tts_voice = document.getElementById('select-google-voice')?.value || 'vi-VN-Chirp3-HD-Aoede';
-        settings.google_tts_speed = parseFloat(document.getElementById('range-google-speed')?.value || 1.0);
+        settings.google_tts_voice = document.getElementById('select-stream-a-google-voice')?.value
+            || prevSettings.stream_a_google_tts_voice
+            || prevSettings.google_tts_voice
+            || 'vi-VN-Chirp3-HD-Aoede';
+        settings.google_tts_speed = prevSettings.google_tts_speed !== undefined ? prevSettings.google_tts_speed : 1.0;
         settings.tts_enabled = this.ttsEnabled;
 
         // Dual mode settings
         settings.audio_source = settings.audio_source === 'both' ? 'dual' : settings.audio_source;
-        settings.dual_mode_enabled = settings.audio_source === 'dual';
+        settings.dual_mode_enabled = this.currentSource === 'dual';
         settings.stream_a_language_source = document.getElementById('select-stream-a-source')?.value || 'auto';
         settings.stream_a_language_target = document.getElementById('select-stream-a-target')?.value || 'vi';
-        settings.stream_a_tts_enabled = document.getElementById('check-stream-a-tts')?.checked || false;
+        settings.stream_a_tts_enabled = this.ttsEnabled;
         settings.stream_a_translated_volume = parseInt(
             document.getElementById('range-stream-a-translated-volume')?.value || 100,
             10
@@ -1215,7 +1313,7 @@ class App {
         settings.stream_b_language_target = document.getElementById('select-stream-b-target')?.value || 'en';
         settings.stream_b_tts_enabled = document.getElementById('check-stream-b-tts')?.checked !== false;
         settings.stream_b_inject_enabled = document.getElementById('check-stream-b-inject')?.checked || false;
-        settings.stream_b_mix_original_enabled = document.getElementById('check-stream-b-mix-original')?.checked || false;
+        settings.stream_b_mix_original_enabled = settings.stream_b_inject_enabled && (document.getElementById('check-stream-b-mix-original')?.checked || false);
         settings.stream_b_original_volume = parseInt(
             document.getElementById('range-stream-b-original-volume')?.value || 100,
             10
@@ -1256,8 +1354,9 @@ class App {
 
         // Mixer settings
         const duckingPctVal = parseInt(document.getElementById('range-ducking-level')?.value ?? 20);
+        const mixerCanEnable = settings.stream_b_mix_original_enabled;
         settings.mixer = {
-            enabled: document.getElementById('check-mixer-enabled')?.checked !== false,
+            enabled: mixerCanEnable && (document.getElementById('check-mixer-enabled')?.checked !== false),
             ducking_level: duckingPctVal / 100,
             vad_sensitivity: document.getElementById('select-vad-sensitivity')?.value || 'medium',
             detection_threshold: (prevSettings.mixer || {}).detection_threshold ?? -40.0,
@@ -1307,7 +1406,8 @@ class App {
             streamA: {
                 sourceLanguage: settings.stream_a_language_source || 'auto',
                 targetLanguage: settings.stream_a_language_target || 'vi',
-                ttsEnabled: settings.stream_a_tts_enabled || false,
+                // Stream A follows the header/global TTS toggle.
+                ttsEnabled: this.ttsEnabled,
                 translatedVolume: Number.isFinite(settings.stream_a_translated_volume)
                     ? settings.stream_a_translated_volume
                     : 1.0,
@@ -1375,6 +1475,10 @@ class App {
         });
 
         const tts = this._getActiveTTS();
+        const keepDualStreamBTts =
+            this.isRunning &&
+            this.currentSource === 'dual' &&
+            this.dualConfig?.streamB?.ttsEnabled;
 
         if (this.ttsEnabled) {
             this._configureTTS(tts, settings);
@@ -1385,9 +1489,17 @@ class App {
             const label = { edge: 'Edge TTS (Free)', google: 'Google Chirp 3 HD', elevenlabs: 'ElevenLabs' }[provider] || provider;
             this._showToast(`TTS narration ON 🔊 (${label})`, 'success');
         } else {
-            tts.disconnect();
-            audioPlayer.stop();
-            this._showToast('TTS narration OFF 🔇', 'success');
+            if (keepDualStreamBTts) {
+                // Header TTS controls single mode + Stream A only; keep Stream B alive in dual mode.
+                this._configureTTS(tts, settings, 'B');
+                tts.connect?.();
+                audioPlayer.resume();
+                this._showToast('TTS OFF for Single/Stream A; Stream B remains ON', 'success');
+            } else {
+                tts.disconnect();
+                audioPlayer.stop();
+                this._showToast('TTS narration OFF 🔇', 'success');
+            }
         }
     }
 
@@ -1475,6 +1587,13 @@ class App {
         if (btn) btn.classList.toggle('active', this.ttsEnabled);
         if (iconOff) iconOff.style.display = this.ttsEnabled ? 'none' : 'block';
         if (iconOn) iconOn.style.display = this.ttsEnabled ? 'block' : 'none';
+
+        const checkStreamATts = document.getElementById('check-stream-a-tts');
+        if (checkStreamATts) {
+            checkStreamATts.checked = this.ttsEnabled;
+            checkStreamATts.disabled = true;
+            checkStreamATts.title = 'Controlled by Header TTS toggle';
+        }
     }
 
     _speakIfEnabled(text) {
@@ -1485,7 +1604,11 @@ class App {
 
     _speakWithRouting(text, options = {}) {
         if (!text?.trim()) return;
-        this._enqueueTtsText(text.trim(), options);
+        const stream = options?.stream;
+        const resolvedOptions = (stream === 'B')
+            ? { ...options, bypassGlobalToggle: true }
+            : options;
+        this._enqueueTtsText(text.trim(), resolvedOptions);
     }
 
     /**
@@ -2619,8 +2742,8 @@ class App {
         const cfgA = this.dualConfig.streamA;
         const cfgB = this.dualConfig.streamB;
 
-        // Dual mode uses stream-level TTS toggles, independent of runtime TTS button.
-        if (cfgA.ttsEnabled || cfgB.ttsEnabled) {
+        // Header TTS controls Stream A; Stream B keeps its own toggle.
+        if (this.ttsEnabled || cfgB.ttsEnabled) {
             const tts = this._getActiveTTS();
             this._configureTTS(tts, settings);
             tts.connect?.();
@@ -2637,7 +2760,7 @@ class App {
         this.sonioxClientA.onTranslation = (text) => {
             if (!this._isRunActive(runId)) return;
             this.transcriptUI.addTranslationForStream('A', text);
-            if (cfgA.ttsEnabled && text?.trim()) {
+            if (this.ttsEnabled && text?.trim()) {
                 this._speakWithRouting(text, { stream: 'A', inject: false, playLocal: true });
             }
         };

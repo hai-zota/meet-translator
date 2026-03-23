@@ -28,7 +28,7 @@ const DEFAULT_SETTINGS = {
   dual_mode_enabled: false,
   stream_a_language_source: 'auto',
   stream_a_language_target: 'vi',
-  stream_a_tts_enabled: false,
+  stream_a_tts_enabled: true,
   stream_a_translated_volume: 1.0,
   stream_b_language_source: 'auto',
   stream_b_language_target: 'en',

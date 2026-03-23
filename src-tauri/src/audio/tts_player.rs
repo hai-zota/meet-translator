@@ -11,7 +11,6 @@ use std::sync::Mutex;
 
 pub enum TtsCommand {
     Play(Vec<u8>), // raw MP3 bytes
-    Stop,
     Shutdown,
 }
 
@@ -58,9 +57,6 @@ impl TtsPlayer {
                                 }
                             }
                         }
-                        Ok(TtsCommand::Stop) => {
-                            sink.clear();
-                        }
                         Ok(TtsCommand::Shutdown) | Err(_) => {
                             sink.clear();
                             break;
@@ -85,10 +81,6 @@ impl TtsPlayer {
         self.tx
             .send(TtsCommand::Play(mp3_bytes))
             .map_err(|_| "TTS player thread stopped".to_string())
-    }
-
-    pub fn stop(&self) {
-        let _ = self.tx.send(TtsCommand::Stop);
     }
 }
 
