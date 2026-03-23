@@ -312,7 +312,7 @@ export class SonioxClient {
         } else if (originalText.trim() && (hasEnd || !provisionalText.trim())) {
             // No translation: emit original directly
             this.onOriginal?.(originalText, speaker);
-            
+
             // Also emit no-translation marker for same-language scenario
             // Use a short dedupe window to avoid duplicate emissions across adjacent frames.
             const now = Date.now();

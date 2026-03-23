@@ -94,10 +94,10 @@ export class TranscriptUI {
      */
     addTranslationForStream(stream, text) {
         const arr = stream === 'A' ? this.segmentsA : this.segmentsB;
-        
+
         // First priority: find pending original (awaiting translation)
         let seg = arr.find(s => s.status === 'original');
-        
+
         // Second priority: if no original found, try to reuse most recent no_translation
         // (could be same utterance that was initially classified as same-language)
         if (!seg) {
@@ -109,7 +109,7 @@ export class TranscriptUI {
                 }
             }
         }
-        
+
         if (seg) {
             seg.translation = text;
             seg.status = 'translated';
@@ -179,7 +179,7 @@ export class TranscriptUI {
     addTranslation(text) {
         // First priority: find pending original (awaiting translation)
         let seg = this.segments.find(s => s.status === 'original');
-        
+
         // Second priority: if no original found, try to reuse most recent no_translation
         // (could be same utterance that was initially classified as same-language)
         if (!seg) {
@@ -191,7 +191,7 @@ export class TranscriptUI {
                 }
             }
         }
-        
+
         if (seg) {
             seg.translation = text;
             seg.status = 'translated';
