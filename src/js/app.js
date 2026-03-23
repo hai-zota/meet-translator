@@ -78,10 +78,12 @@ class App {
         this._ttsPumpHeartbeat = 0;   // Last observed pump activity timestamp
         this._ttsInFlight = 0;        // Number of active TTS API requests
         this._ttsMaxConcurrent = 3;   // Concurrent synthesis requests
+        this._ttsMaxBacklog = 120;    // Max pending text chunks before backpressure
         this._ttsSeqCounter = 1;      // Monotonic sequence id per transcript chunk
         this._ttsNextFlushSeq = 1;    // Next sequence id that can be routed to playback
         this._ttsReadyMap = new Map(); // seq -> { base64Audio, options }
         this._ttsFlushRunning = false; // Guard ordered flush from concurrent re-entry
+        this._translatedInjectMaxQueue = 24; // Buffer translated PCM chunks for smoother inject
         this._runId = 0; // Incremented on each start/stop to invalidate stale callbacks
         this._dualStreamStates = { A: 'idle', B: 'idle' };
         this._dualStreamErrorHistory = { A: [], B: [] };
@@ -1562,8 +1564,42 @@ class App {
             });
         }
 
-        // Update current source button states
+        // Update current source first
         this.currentSource = settings.audio_source === 'both' ? 'dual' : (settings.audio_source || 'system');
+
+        // Validate voice options by language early, so quick controls don't show
+        // out-of-language voices as enabled on first app load.
+        this._syncTranslationVoiceOptions(settings);
+        const changedA = this._syncDefaultVoiceForStream(
+            settings,
+            'A',
+            this.currentSource === 'dual' ? 'A' : 'single'
+        );
+        const changedB = this._syncDefaultVoiceForStream(settings, 'B', 'B');
+
+        // Persist normalized voice selections so next startup is already correct.
+        if (changedA || changedB) {
+            const provider = settings.tts_provider || 'edge';
+            const patch = {};
+            if (provider === 'google') {
+                patch.stream_a_google_tts_voice = settings.stream_a_google_tts_voice;
+                patch.stream_b_google_tts_voice = settings.stream_b_google_tts_voice;
+                patch.google_tts_voice = settings.google_tts_voice;
+            } else if (provider === 'elevenlabs') {
+                patch.stream_a_elevenlabs_voice_id = settings.stream_a_elevenlabs_voice_id;
+                patch.stream_b_elevenlabs_voice_id = settings.stream_b_elevenlabs_voice_id;
+                patch.tts_voice_id = settings.tts_voice_id;
+            } else {
+                patch.stream_a_edge_tts_voice = settings.stream_a_edge_tts_voice;
+                patch.stream_b_edge_tts_voice = settings.stream_b_edge_tts_voice;
+                patch.edge_tts_voice = settings.edge_tts_voice;
+            }
+            settingsManager.save(patch).catch((err) => {
+                console.warn('[Settings] Failed to persist normalized voices:', err);
+            });
+        }
+
+        // Update current source button states (also syncs quick controls)
         this._updateSourceButtons();
 
         // Restore persisted global TTS toggle on first settings application.
@@ -1795,9 +1831,12 @@ class App {
      */
     _enqueueTtsText(text, options) {
         this._ttsTextQueue.push({ seq: this._ttsSeqCounter++, text, options });
-        // Cap queue to prevent unbounded growth
-        if (this._ttsTextQueue.length > 30) {
-            this._ttsTextQueue.splice(0, this._ttsTextQueue.length - 20);
+        // For inject path, never drop text chunks (must keep parity with transcript).
+        // For local-only playback, apply soft backpressure to avoid unbounded growth.
+        const mustKeep = options?.inject === true;
+        if (!mustKeep && this._ttsTextQueue.length > this._ttsMaxBacklog) {
+            this._ttsTextQueue.pop();
+            console.warn('[TTS] Local-only text backlog limit reached; dropping newest chunk');
         }
         this._scheduleTtsPump();
     }
@@ -1879,9 +1918,28 @@ class App {
         const stream = options?.stream;
         const synthStream = (stream === 'A' || stream === 'B') ? stream : 'single';
 
-        const base64Audio = await this._ttsGetBase64(text, synthStream);
-        if (!base64Audio || token !== this._ttsPumpToken || !this.isRunning) return;
+        let base64Audio = null;
+        let synthError = null;
+        const maxAttempts = options?.inject ? 3 : 2;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                base64Audio = await this._ttsGetBase64(text, synthStream);
+                if (base64Audio) break;
+            } catch (err) {
+                synthError = err;
+                if (attempt < maxAttempts) {
+                    await new Promise((r) => setTimeout(r, 120 * attempt));
+                }
+            }
+        }
 
+        if (token !== this._ttsPumpToken || !this.isRunning) return;
+
+        if (!base64Audio && synthError) {
+            console.error('[TTS] Synthesis failed for seq', seq, synthError);
+        }
+
+        // Always publish seq result (including failures) so ordered flush never stalls.
         this._ttsReadyMap.set(seq, { base64Audio, options });
         await this._flushReadyTtsAudio(token);
     }
@@ -1982,20 +2040,16 @@ class App {
             if (scaledPcm.length < 2) return;
         }
 
-        // Send in fixed windows to avoid large IPC payload spikes on long translated chunks.
-        const INJECT_CHUNK_BYTES = 6400; // ~200ms @ 16kHz mono s16le
+        // Send as a single block to reduce IPC round-trips and avoid queue jitter.
+        // Rust inject player maintains its own buffered playback queue.
         const command = channel === 'original'
             ? 'inject_original_pcm_to_device'
             : 'inject_translated_pcm_to_device';
-        for (let offset = 0; offset < scaledPcm.length; offset += INJECT_CHUNK_BYTES) {
-            const chunk = scaledPcm.slice(offset, offset + INJECT_CHUNK_BYTES);
-            if (chunk.length < 2) continue;
-            await invoke(command, {
-                deviceName: this.injectDeviceName,
-                pcmData: chunk,
-                sampleRate: 16000,
-            });
-        }
+        await invoke(command, {
+            deviceName: this.injectDeviceName,
+            pcmData: scaledPcm,
+            sampleRate: 16000,
+        });
         this._injectFailureCount = 0;
         this._injectUsedLegacyFallback = false;
     }
@@ -2080,9 +2134,8 @@ class App {
             }
         } else {
             this._translatedInjectQueue.push(item);
-            if (this._translatedInjectQueue.length > 3) {
-                this._translatedInjectQueue.splice(0, this._translatedInjectQueue.length - 3);
-            }
+            // Do not drop translated chunks; keep full parity with transcript.
+            // Buffer may grow under sustained pressure, but order/completeness is preserved.
         }
         this._runInjectPump();
     }
@@ -2241,44 +2294,11 @@ class App {
 
     async _decodeBase64ToPcm16Mono(base64Audio, targetSampleRate = 16000) {
         if (!base64Audio) throw new Error('Empty TTS audio');
-
-        // Ensure we have an AudioContext available for decoding.
-        audioPlayer.init();
-        await audioPlayer.resume();
-
-        const binary = atob(base64Audio);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-        }
-
-        const arrayBuffer = bytes.buffer.slice(0);
-        const audioBuffer = await audioPlayer.audioContext.decodeAudioData(arrayBuffer);
-
-        const srcRate = audioBuffer.sampleRate;
-        const channels = audioBuffer.numberOfChannels;
-        const srcLength = audioBuffer.length;
-        const ratio = srcRate / targetSampleRate;
-        const outLength = Math.max(1, Math.floor(srcLength / ratio));
-
-        const chData = [];
-        for (let c = 0; c < channels; c++) {
-            chData.push(audioBuffer.getChannelData(c));
-        }
-
-        const pcm = new Int16Array(outLength);
-        for (let i = 0; i < outLength; i++) {
-            const srcIdx = Math.min(srcLength - 1, Math.floor(i * ratio));
-            let mixed = 0;
-            for (let c = 0; c < channels; c++) {
-                mixed += chData[c][srcIdx];
-            }
-            mixed /= channels;
-            const clamped = Math.max(-1, Math.min(1, mixed));
-            pcm[i] = clamped < 0 ? clamped * 32768 : clamped * 32767;
-        }
-
-        return Array.from(new Uint8Array(pcm.buffer));
+        const pcmBytes = await invoke('decode_tts_base64_to_pcm16_mono', {
+            base64Audio,
+            targetSampleRate,
+        });
+        return Array.isArray(pcmBytes) ? pcmBytes : [];
     }
 
     _isRunActive(runId) {

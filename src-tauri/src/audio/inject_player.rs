@@ -160,7 +160,9 @@ impl ActiveOutput {
 
         let out_rate = supported.sample_rate().0.max(1);
         let out_channels = supported.channels().max(1);
-        let max_buffered_samples = out_rate as usize * out_channels as usize * 5;
+        // Larger queue smooths bursty TTS chunk arrivals from frontend and
+        // reduces underflow crackle on virtual devices like BlackHole.
+        let max_buffered_samples = out_rate as usize * out_channels as usize * 12;
         let queues = Arc::new(Mutex::new(MixQueues {
             original: VecDeque::with_capacity(max_buffered_samples.min(65536)),
             translated: VecDeque::with_capacity(max_buffered_samples.min(65536)),

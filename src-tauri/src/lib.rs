@@ -72,6 +72,7 @@ pub fn run() {
             commands::audio::inject_pcm_to_device,
             commands::audio::inject_original_pcm_to_device,
             commands::audio::inject_translated_pcm_to_device,
+            commands::audio::decode_tts_base64_to_pcm16_mono,
             commands::audio::stop_inject_audio,
             commands::transcript::save_transcript,
             commands::transcript::open_transcript_dir,

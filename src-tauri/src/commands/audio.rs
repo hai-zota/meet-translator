@@ -3,7 +3,9 @@ use crate::audio::microphone::MicCapture;
 use crate::audio::SystemAudioCapture;
 use base64::Engine as _;
 use cpal::traits::{DeviceTrait, HostTrait};
+use rodio::{Decoder, Source};
 use serde::Serialize;
+use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -338,6 +340,99 @@ pub async fn inject_translated_pcm_to_device(
         }
         Err(err) => Err(err),
     }
+}
+
+#[tauri::command]
+pub fn decode_tts_base64_to_pcm16_mono(
+    base64_audio: String,
+    target_sample_rate: u32,
+) -> Result<Vec<u8>, String> {
+    decode_mp3_base64_to_pcm16_mono(base64_audio, target_sample_rate)
+}
+
+fn decode_mp3_base64_to_pcm16_mono(
+    base64_audio: String,
+    target_sample_rate: u32,
+) -> Result<Vec<u8>, String> {
+    if base64_audio.trim().is_empty() {
+        return Err("Empty audio payload".to_string());
+    }
+
+    let mp3_bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_audio)
+        .map_err(|e| format!("Invalid base64 audio payload: {}", e))?;
+
+    if mp3_bytes.is_empty() {
+        return Err("Decoded audio payload is empty".to_string());
+    }
+
+    let cursor = Cursor::new(mp3_bytes);
+    let decoder = Decoder::new(cursor).map_err(|e| format!("MP3 decode error: {}", e))?;
+
+    let src_channels = usize::from(decoder.channels().max(1));
+    let src_rate = decoder.sample_rate().max(1);
+    let target_rate = target_sample_rate.max(1);
+
+    // rodio Decoder yields interleaved i16 samples.
+    let interleaved_i16: Vec<i16> = decoder.collect();
+    let interleaved: Vec<f32> = interleaved_i16
+        .into_iter()
+        .map(|s| f32::from(s) / 32768.0)
+        .collect();
+    if interleaved.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Downmix to mono.
+    let frame_count = interleaved.len() / src_channels;
+    if frame_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut mono = Vec::with_capacity(frame_count);
+    for frame_idx in 0..frame_count {
+        let start = frame_idx * src_channels;
+        let mut mixed = 0.0f32;
+        for ch in 0..src_channels {
+            mixed += interleaved[start + ch];
+        }
+        mono.push(mixed / src_channels as f32);
+    }
+
+    // Linear interpolation resample mono -> target_rate.
+    let resampled = if src_rate == target_rate {
+        mono
+    } else {
+        let ratio = src_rate as f64 / target_rate as f64;
+        let out_len = ((mono.len() as f64) / ratio).floor().max(1.0) as usize;
+        let mut out = Vec::with_capacity(out_len);
+
+        for i in 0..out_len {
+            let src_pos = i as f64 * ratio;
+            let idx0 = src_pos.floor() as usize;
+            let idx1 = (idx0 + 1).min(mono.len() - 1);
+            let frac = (src_pos - idx0 as f64) as f32;
+            let s0 = mono[idx0];
+            let s1 = mono[idx1];
+            out.push(s0 + (s1 - s0) * frac);
+        }
+
+        out
+    };
+
+    // f32 mono -> s16le bytes.
+    let mut pcm_bytes = Vec::with_capacity(resampled.len() * 2);
+    for sample in resampled {
+        let clamped = sample.clamp(-1.0, 1.0);
+        let i16_sample = if clamped < 0.0 {
+            (clamped * 32768.0) as i16
+        } else {
+            (clamped * 32767.0) as i16
+        };
+        pcm_bytes.extend_from_slice(&i16_sample.to_le_bytes());
+    }
+
+    Ok(pcm_bytes)
 }
 
 #[tauri::command]
