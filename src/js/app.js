@@ -67,8 +67,6 @@ class App {
         this._lastInjectErrorTs = 0;
         this._injectFailureCount = 0;
         this._injectUsedLegacyFallback = false;
-        this._injectTextQueue = [];
-        this._isInjectingText = false;
         this._originalInjectQueue = [];
         this._translatedInjectQueue = [];
         this._isPumpRunning = false;
@@ -2063,6 +2061,11 @@ class App {
         return this._recentOriginalPcm.slice(this._recentOriginalPcm.length - n);
     }
 
+    _isOriginalInjectAllowed() {
+        const cfgB = this.dualConfig?.streamB;
+        return !!(cfgB?.injectEnabled && cfgB?.mixOriginalEnabled);
+    }
+
     _enqueuePcmInject(pcmData, stream, volume = 1.0, priority = 'translated') {
         const item = {
             pcmData: Array.isArray(pcmData) ? pcmData : Array.from(new Uint8Array(pcmData)),
@@ -2094,8 +2097,13 @@ class App {
             while (this.isRunning) {
                 let didWork = false;
 
+                // Hard guard: if original inject is disabled, drop any stale queued original bytes.
+                if (!this._isOriginalInjectAllowed() && this._originalInjectQueue.length > 0) {
+                    this._originalInjectQueue = [];
+                }
+
                 // 1) Always push original channel continuously when available.
-                if (this._originalInjectQueue.length > 0) {
+                if (this._isOriginalInjectAllowed() && this._originalInjectQueue.length > 0) {
                     const origBytes = this._dequeueOriginalBytes(ORIGINAL_ONLY_WINDOW_BYTES);
                     if (origBytes.length > 0) {
                         const stream = this._originalInjectQueue[0]?.stream || 'B';
@@ -2170,14 +2178,6 @@ class App {
         }
     }
 
-    _enqueueInjectText(text) {
-        if (!text?.trim()) return;
-        this._injectTextQueue.push(text.trim());
-        if (!this._isInjectingText) {
-            this._processInjectTextQueue();
-        }
-    }
-
     // Synthesize text using the active TTS provider from general settings.
     // stream='A' or 'B' selects per-stream voice; otherwise uses global voice.
     async _ttsGetBase64(text, stream = 'B') {
@@ -2237,28 +2237,6 @@ class App {
         const rate = cfg?.edgeSpeed !== undefined ? cfg.edgeSpeed
                    : (s.edge_tts_speed !== undefined ? s.edge_tts_speed : 20);
         return await invoke('edge_tts_speak', { text, voice, rate });
-    }
-
-    async _processInjectTextQueue() {
-        if (this._isInjectingText) return;
-        this._isInjectingText = true;
-
-        try {
-            while (this._injectTextQueue.length > 0 && this.isRunning) {
-                const text = this._injectTextQueue.shift();
-                const base64Audio = await this._ttsGetBase64(text, 'B');
-                await this._injectAudioChunk(
-                    base64Audio,
-                    'B',
-                    this._clampVolume(this.dualConfig.streamB.translatedVolume, 1.0)
-                );
-            }
-        } catch (err) {
-            console.error('[Inject] Direct translated-text injection failed:', err);
-            this._showToast(`Direct inject failed: ${err}`, 'error');
-        } finally {
-            this._isInjectingText = false;
-        }
     }
 
     async _decodeBase64ToPcm16Mono(base64Audio, targetSampleRate = 16000) {
@@ -3063,16 +3041,14 @@ class App {
             const liveCfgB = this.dualConfig.streamB;
             this.transcriptUI.addTranslationForStream('B', text);
             console.log('[DualB] translation received, tts=', liveCfgB.ttsEnabled, 'inject=', liveCfgB.injectEnabled);
-            if (liveCfgB.ttsEnabled && text?.trim()) {
+            if (text?.trim() && (liveCfgB.ttsEnabled || liveCfgB.injectEnabled)) {
+                // Single synthesis request per transcript chunk. Audio is then routed
+                // to local playback and/or BlackHole based on current stream B settings.
                 this._speakWithRouting(text, {
                     stream: 'B',
-                    inject: false,
-                    playLocal: true,
+                    inject: liveCfgB.injectEnabled,
+                    playLocal: liveCfgB.ttsEnabled,
                 });
-            }
-
-            if (liveCfgB.injectEnabled && text?.trim()) {
-                this._enqueueInjectText(text);
             }
         };
         this.sonioxClientB.onProvisional = (text, speaker) =>
@@ -3135,8 +3111,7 @@ class App {
             this.sonioxClientB.sendAudio(bytes.buffer);
             this._appendRecentOriginalPcm(bytes);
 
-            const shouldBypassInject = Date.now() < this._streamBInjectBypassUntil;
-            if (liveCfgB.injectEnabled && (liveCfgB.mixOriginalEnabled || shouldBypassInject)) {
+            if (this._isOriginalInjectAllowed()) {
                 this._enqueuePcmInject(
                     bytes,
                     'B',
