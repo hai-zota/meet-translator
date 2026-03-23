@@ -79,13 +79,17 @@ pub fn start_local_pipeline(
     log_to_file(&format!("Using script: {:?}", script_path));
     let _ = channel.send(format!(r#"{{"type":"status","message":"Starting Python pipeline..."}}"#));
 
-    // Use venv python if MLX setup is complete, otherwise fall back to system python
+    // Prefer new app support path, but keep fallback for existing installs.
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/phucnt".to_string());
-    let venv_python = format!("{}/Library/Application Support/My Translator/mlx-env/bin/python3", home);
+    let new_venv_python = format!("{}/Library/Application Support/Meet Translator/mlx-env/bin/python3", home);
+    let old_venv_python = format!("{}/Library/Application Support/My Translator/mlx-env/bin/python3", home);
 
-    let python = if std::path::Path::new(&venv_python).exists() {
-        log_to_file(&format!("Using venv python: {}", venv_python));
-        venv_python.as_str().to_string()
+    let python = if std::path::Path::new(&new_venv_python).exists() {
+        log_to_file(&format!("Using venv python: {}", new_venv_python));
+        new_venv_python.as_str().to_string()
+    } else if std::path::Path::new(&old_venv_python).exists() {
+        log_to_file(&format!("Using legacy venv python: {}", old_venv_python));
+        old_venv_python.as_str().to_string()
     } else if std::path::Path::new("/opt/homebrew/bin/python3").exists() {
         log_to_file("Using homebrew python");
         "/opt/homebrew/bin/python3".to_string()
@@ -223,8 +227,16 @@ fn stop_local_pipeline_inner(state: &LocalPipelineState) {
 #[tauri::command]
 pub fn check_mlx_setup() -> Result<String, String> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/phucnt".to_string());
-    let marker = format!("{}/Library/Application Support/My Translator/mlx-env/.setup_complete", home);
-    let venv_python = format!("{}/Library/Application Support/My Translator/mlx-env/bin/python3", home);
+    let new_marker = format!("{}/Library/Application Support/Meet Translator/mlx-env/.setup_complete", home);
+    let new_venv_python = format!("{}/Library/Application Support/Meet Translator/mlx-env/bin/python3", home);
+    let old_marker = format!("{}/Library/Application Support/My Translator/mlx-env/.setup_complete", home);
+    let old_venv_python = format!("{}/Library/Application Support/My Translator/mlx-env/bin/python3", home);
+
+    let (marker, venv_python) = if std::path::Path::new(&new_marker).exists() && std::path::Path::new(&new_venv_python).exists() {
+        (new_marker, new_venv_python)
+    } else {
+        (old_marker, old_venv_python)
+    };
 
     if std::path::Path::new(&marker).exists() && std::path::Path::new(&venv_python).exists() {
         // Read marker to get details

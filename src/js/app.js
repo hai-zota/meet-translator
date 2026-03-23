@@ -82,6 +82,7 @@ class App {
         this._dualStreamStates = { A: 'idle', B: 'idle' };
         this._dualStreamErrorHistory = { A: [], B: [] };
         this._lastStreamErrorToastTs = { A: 0, B: 0 };
+        this._lastSonioxTransientToastTs = 0;
     }
 
     async init() {
@@ -402,10 +403,19 @@ class App {
 
         // Translation target language changes should auto-select/filter voices.
         document.getElementById('select-stream-a-target')?.addEventListener('change', () => {
-            this._syncTranslationVoiceOptions(settingsManager.get());
+            const settings = settingsManager.get();
+            settings.stream_a_language_target = document.getElementById('select-stream-a-target')?.value || settings.stream_a_language_target || 'vi';
+            settings.target_language = settings.stream_a_language_target;
+            this._syncTranslationVoiceOptions(settings);
+            this._syncDefaultVoiceForStream(settings, 'A', this.currentSource === 'dual' ? 'A' : 'single');
+            this._syncQuickLocaleControls(settings);
         });
         document.getElementById('select-stream-b-target')?.addEventListener('change', () => {
-            this._syncTranslationVoiceOptions(settingsManager.get());
+            const settings = settingsManager.get();
+            settings.stream_b_language_target = document.getElementById('select-stream-b-target')?.value || settings.stream_b_language_target || 'en';
+            this._syncTranslationVoiceOptions(settings);
+            this._syncDefaultVoiceForStream(settings, 'B', 'B');
+            this._syncQuickLocaleControls(settings);
         });
 
         document.getElementById('check-stream-b-inject')?.addEventListener('change', () => {
@@ -509,7 +519,16 @@ class App {
         };
 
         sonioxClient.onError = (error) => {
-            this._showToast(error, 'error');
+            const msg = String(error || 'Unknown error');
+            const isTransient = /reconnecting \(\d+\/\d+\)|request timeout|connection lost unexpectedly|connection closed/i.test(msg);
+            if (isTransient) {
+                const now = Date.now();
+                if (now - this._lastSonioxTransientToastTs < 4500) return;
+                this._lastSonioxTransientToastTs = now;
+                this._showToast(msg, 'info');
+                return;
+            }
+            this._showToast(msg, 'error');
         };
     }
 
@@ -528,17 +547,28 @@ class App {
                 try {
                     const settings = settingsManager.get();
                     const value = e.target.value;
+                    const voiceStream = this.currentSource === 'dual' ? 'A' : 'single';
                     if (this.currentSource === 'dual') {
                         settings.stream_a_language_target = value;
                     } else {
                         settings.target_language = value;
                         settings.stream_a_language_target = value;
                     }
+
+                    const streamATarget = document.getElementById('select-stream-a-target');
+                    const singleTarget = document.getElementById('select-target-lang');
+                    if (streamATarget) streamATarget.value = settings.stream_a_language_target;
+                    if (singleTarget) singleTarget.value = settings.target_language || settings.stream_a_language_target;
+
+                    this._syncTranslationVoiceOptions(settings);
+                    const voiceChanged = this._syncDefaultVoiceForStream(settings, 'A', voiceStream);
+                    this._syncQuickLocaleControls(settings);
+
                     await settingsManager.save(settings);
                     await this._applyQuickRealtimeChanges({
                         languageChanged: true,
-                        voiceChanged: false,
-                        stream: this.currentSource === 'dual' ? 'A' : 'single',
+                        voiceChanged,
+                        stream: voiceStream,
                     });
                 } catch (err) {
                     console.error('[QuickControls] Failed to save My Language:', err);
@@ -568,10 +598,18 @@ class App {
                 try {
                     const settings = settingsManager.get();
                     settings.stream_b_language_target = e.target.value;
+
+                    const streamBTarget = document.getElementById('select-stream-b-target');
+                    if (streamBTarget) streamBTarget.value = settings.stream_b_language_target;
+
+                    this._syncTranslationVoiceOptions(settings);
+                    const voiceChanged = this._syncDefaultVoiceForStream(settings, 'B', 'B');
+                    this._syncQuickLocaleControls(settings);
+
                     await settingsManager.save(settings);
                     await this._applyQuickRealtimeChanges({
                         languageChanged: true,
-                        voiceChanged: false,
+                        voiceChanged,
                         stream: 'B',
                     });
                 } catch (err) {
@@ -636,16 +674,9 @@ class App {
 
     _renderQuickLanguageCollapsed(selectEl) {
         if (!selectEl) return;
-        const selected = selectEl.options[selectEl.selectedIndex];
-        if (!selected) return;
-        const flag = this._languageFlag(selected.value);
-        // Native select shows selected option text in collapsed state.
-        // Keep only flag for selected option; restore full labels on open.
-        Array.from(selectEl.options).forEach((opt) => {
-            const baseName = opt.dataset.langName || opt.textContent;
-            opt.textContent = `${this._languageFlag(opt.value)} ${baseName}`;
-        });
-        selected.textContent = flag;
+        // Keep full "flag + language" labels in collapsed state.
+        // Width control and truncation are handled by CSS to avoid overflow.
+        this._decorateQuickLanguageOptions(selectEl);
     }
 
     _bindQuickLanguageSelectBehavior(selectEl) {
@@ -717,6 +748,11 @@ class App {
                 ja: ['ja-JP-'],
                 ko: ['ko-KR-'],
                 zh: ['zh-CN-'],
+                fr: ['fr-FR-'],
+                de: ['de-DE-'],
+                es: ['es-ES-'],
+                th: ['th-TH-'],
+                id: ['id-ID-'],
             };
             return map[targetLanguage] || [];
         }
@@ -727,10 +763,56 @@ class App {
                 ja: ['ja-JP-'],
                 ko: ['ko-KR-'],
                 zh: ['cmn-CN-', 'zh-CN-'],
+                fr: ['fr-FR-'],
+                de: ['de-DE-'],
+                es: ['es-ES-'],
+                th: ['th-TH-'],
+                id: ['id-ID-'],
             };
             return map[targetLanguage] || [];
         }
         return [];
+    }
+
+    _voiceSelectForProvider(provider, stream) {
+        const suffix = stream === 'B' ? 'b' : 'a';
+        if (provider === 'google') {
+            return document.getElementById(`select-stream-${suffix}-google-voice`);
+        }
+        if (provider === 'elevenlabs') {
+            return document.getElementById(`select-stream-${suffix}-elevenlabs-voice`);
+        }
+        return document.getElementById(`select-stream-${suffix}-edge-voice`);
+    }
+
+    _firstVisibleVoiceValue(selectEl) {
+        if (!selectEl) return null;
+        const visible = Array.from(selectEl.options || []).find((opt) => !opt.hidden && !opt.disabled);
+        return visible?.value || null;
+    }
+
+    _syncDefaultVoiceForStream(settings, stream, settingsStream) {
+        const provider = settings?.tts_provider || 'edge';
+        const targetLanguage = stream === 'B'
+            ? (settings?.stream_b_language_target || 'en')
+            : (settings?.stream_a_language_target || settings?.target_language || 'vi');
+
+        const selectEl = this._voiceSelectForProvider(provider, stream);
+        if (!selectEl) return false;
+
+        this._filterVoiceSelectByLanguage(selectEl, provider, targetLanguage);
+
+        const firstVisible = this._firstVisibleVoiceValue(selectEl);
+        if (!firstVisible) return false;
+
+        const selectedValid = Array.from(selectEl.options || []).some(
+            (opt) => opt.value === selectEl.value && !opt.hidden && !opt.disabled
+        );
+        const nextVoice = selectedValid ? selectEl.value : firstVisible;
+        const prevVoice = this._getQuickVoiceFromSettings(settings, settingsStream);
+        selectEl.value = nextVoice;
+        this._setQuickVoiceInSettings(settings, settingsStream, nextVoice);
+        return prevVoice !== nextVoice;
     }
 
     _filterVoiceSelectByLanguage(selectEl, provider, targetLanguage) {
@@ -747,11 +829,11 @@ class App {
             return;
         }
 
-        // No matching voice for this language/provider in curated list.
+        // If there is no language-code mapping, do not restrict voice choices.
         if (prefixes.length === 0) {
             options.forEach((opt) => {
-                opt.hidden = true;
-                opt.disabled = true;
+                opt.hidden = false;
+                opt.disabled = false;
             });
             return;
         }
@@ -766,6 +848,15 @@ class App {
             }
         });
 
+        // If no voice matches this language in current curated list, fallback to all voices.
+        if (firstVisibleValue === null) {
+            options.forEach((opt) => {
+                opt.hidden = false;
+                opt.disabled = false;
+            });
+            firstVisibleValue = options[0]?.value || null;
+        }
+
         const selectedVisible = options.some((opt) => opt.value === selectEl.value && !opt.hidden && !opt.disabled);
         if (!selectedVisible && firstVisibleValue) {
             selectEl.value = firstVisibleValue;
@@ -774,12 +865,12 @@ class App {
 
     _syncTranslationVoiceOptions(settings) {
         const provider = settings?.tts_provider || settingsManager.get().tts_provider || 'edge';
-        const langA = document.getElementById('select-stream-a-target')?.value
-            || settings?.stream_a_language_target
+        const langA = settings?.stream_a_language_target
             || settings?.target_language
+            || document.getElementById('select-stream-a-target')?.value
             || 'vi';
-        const langB = document.getElementById('select-stream-b-target')?.value
-            || settings?.stream_b_language_target
+        const langB = settings?.stream_b_language_target
+            || document.getElementById('select-stream-b-target')?.value
             || 'en';
 
         this._filterVoiceSelectByLanguage(document.getElementById('select-stream-a-edge-voice'), 'edge', langA);

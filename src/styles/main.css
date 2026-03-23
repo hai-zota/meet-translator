@@ -40,6 +40,7 @@
 
   /* Sizing */
   --control-bar-height: 42px;
+  --quick-settings-height: 38px;
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
@@ -256,6 +257,10 @@ body {
   padding-top: 4px;
 }
 
+.compact-mode .quick-settings-bar {
+  display: none !important;
+}
+
 /* Status Area */
 .status-area {
   display: flex;
@@ -405,6 +410,18 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 12px 16px;
+}
+
+/* Quick settings bar below title/control bar */
+.quick-settings-bar {
+  flex-shrink: 0;
+  min-height: var(--quick-settings-height);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(16, 16, 24, 0.5);
 }
 
 /* Custom scrollbar */
@@ -669,11 +686,14 @@ body {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 4px;
-  height: 30px;
-  padding: 2px 4px;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 680px;
+  min-height: 30px;
+  padding: 2px;
   border-radius: 6px;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.32);
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
@@ -681,6 +701,8 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex: 1;
+  min-width: 0;
 }
 
 .quick-select {
@@ -697,16 +719,18 @@ body {
 
 .quick-select.quick-voice {
   min-width: 132px;
-  max-width: 180px;
+  max-width: 100%;
 }
 
 /* Keep collapsed language selector compact (flag only), while dropdown still contains full labels. */
 .quick-select.quick-language-select {
-  width: 44px;
-  min-width: 44px;
-  max-width: 44px;
-  padding-left: 10px;
-  text-overflow: clip;
+  width: 110px;
+  min-width: 110px;
+  max-width: 110px;
+  padding-left: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .quick-select:focus {
@@ -716,6 +740,30 @@ body {
 
 #overlay-view:hover .floating-controls {
   opacity: 1;
+}
+
+#quick-meeting-row {
+  justify-content: flex-end;
+}
+
+@media (max-width: 860px) {
+  .quick-settings-bar {
+    padding: 4px 6px;
+  }
+
+  .quick-locale-controls {
+    gap: 4px;
+  }
+
+  .quick-select.quick-voice {
+    min-width: 108px;
+  }
+
+  .quick-select.quick-language-select {
+    width: 92px;
+    min-width: 92px;
+    max-width: 92px;
+  }
 }
 
 .font-controls {

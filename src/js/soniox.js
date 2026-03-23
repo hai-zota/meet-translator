@@ -12,8 +12,11 @@
 const SONIOX_ENDPOINT = 'wss://stt-rt.soniox.com/transcribe-websocket';
 
 // Reconnect settings
-const MAX_RECONNECT = 3;
-const RECONNECT_DELAY_MS = 2000;
+const MAX_RECONNECT = 5;
+const RECONNECT_BASE_DELAY_MS = 1200;
+const RECONNECT_MAX_DELAY_MS = 12000;
+const RECONNECT_JITTER_MS = 400;
+const TRANSIENT_ERROR_NOTIFY_COOLDOWN_MS = 3500;
 
 // Session reset: 3 minutes
 const SESSION_DURATION_MS = 3 * 60 * 1000;
@@ -31,6 +34,9 @@ export class SonioxClient {
         this._intentionalDisconnect = false;
         this._sessionTimer = null;
         this._recentTranslations = []; // Rolling buffer of recent translations
+        this._reconnectTimer = null;
+        this._isReconnectScheduled = false;
+        this._lastTransientNotifyTs = 0;
 
         // Callbacks
         this.onOriginal = null;       // (text, speaker) => {}
@@ -50,6 +56,7 @@ export class SonioxClient {
         this._intentionalDisconnect = false;
         this._reconnectAttempts = 0;
         this._recentTranslations = [];
+        this._clearReconnectTimer();
 
         if (!apiKey) {
             this._setStatus('error');
@@ -136,6 +143,7 @@ export class SonioxClient {
             this.ws = newWs;
             this.isConnected = true;
             this._reconnectAttempts = 0;
+            this._clearReconnectTimer();
             this._setStatus('connected');
             console.log('[Soniox] Connected and config sent');
 
@@ -164,7 +172,7 @@ export class SonioxClient {
         newWs.onerror = (event) => {
             if (newWs._isOld) return;
             console.error('[Soniox] WebSocket ERROR:', event);
-            this.onError?.('WebSocket error occurred');
+            // Avoid user-visible spam here; onclose path handles reconnect/reporting.
         };
 
         newWs.onclose = (event) => {
@@ -222,6 +230,7 @@ export class SonioxClient {
     disconnect() {
         this._intentionalDisconnect = true;
         this._stopSessionTimer();
+        this._clearReconnectTimer();
 
         if (this.ws) {
             try {
@@ -235,6 +244,7 @@ export class SonioxClient {
             this.ws = null;
         }
         this.isConnected = false;
+        this._reconnectAttempts = 0;
         this._setStatus('disconnected');
     }
 
@@ -381,25 +391,51 @@ export class SonioxClient {
     }
 
     _tryReconnect(reason) {
+        if (this._intentionalDisconnect || !this._config) return;
+
+        // Prevent duplicate timers from multiple close/error signals.
+        if (this._isReconnectScheduled) return;
+
         if (this._reconnectAttempts >= MAX_RECONNECT) {
+            this._clearReconnectTimer();
             this._setStatus('error');
             this.onError?.(`${reason}. Reconnect failed after ${MAX_RECONNECT} attempts.`);
             return;
         }
 
         this._reconnectAttempts++;
-        const delay = RECONNECT_DELAY_MS * this._reconnectAttempts;
+        const expDelay = Math.min(
+            RECONNECT_MAX_DELAY_MS,
+            RECONNECT_BASE_DELAY_MS * Math.pow(2, this._reconnectAttempts - 1)
+        );
+        const jitter = Math.floor(Math.random() * RECONNECT_JITTER_MS);
+        const delay = expDelay + jitter;
 
         console.log(`Reconnecting (${this._reconnectAttempts}/${MAX_RECONNECT}) in ${delay}ms...`);
         this._setStatus('connecting');
-        this.onError?.(`${reason}. Reconnecting (${this._reconnectAttempts}/${MAX_RECONNECT})...`);
+        const now = Date.now();
+        if (now - this._lastTransientNotifyTs > TRANSIENT_ERROR_NOTIFY_COOLDOWN_MS) {
+            this._lastTransientNotifyTs = now;
+            this.onError?.(`${reason}. Reconnecting (${this._reconnectAttempts}/${MAX_RECONNECT})...`);
+        }
 
-        setTimeout(() => {
+        this._isReconnectScheduled = true;
+        this._reconnectTimer = setTimeout(() => {
+            this._isReconnectScheduled = false;
+            this._reconnectTimer = null;
             if (!this._intentionalDisconnect && this._config) {
                 const carryover = this._getCarryoverContext();
                 this._doConnect(this._config, carryover);
             }
         }, delay);
+    }
+
+    _clearReconnectTimer() {
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+        this._isReconnectScheduled = false;
     }
 
     _setStatus(status) {

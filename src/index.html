@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>My Translator</title>
+  <title>Meet Translator</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
@@ -126,6 +126,19 @@
       </div>
     </div>
 
+    <div class="quick-settings-bar" data-tauri-drag-region>
+      <div class="quick-locale-controls" id="quick-locale-controls">
+        <div class="quick-row" id="quick-my-row">
+          <select id="quick-my-language" class="quick-select quick-language-select" title="My Language"></select>
+          <select id="quick-my-voice" class="quick-select quick-voice" title="My Voice"></select>
+        </div>
+        <div class="quick-row" id="quick-meeting-row" style="display:none;">
+          <select id="quick-meeting-language" class="quick-select quick-language-select" title="Meeting Language"></select>
+          <select id="quick-meeting-voice" class="quick-select quick-voice" title="Meeting Voice"></select>
+        </div>
+      </div>
+    </div>
+
     <!-- Transcript Area -->
     <div id="transcript-container" data-tauri-drag-region>
       <div id="transcript-content" data-tauri-drag-region>
@@ -144,16 +157,6 @@
 
     <!-- Floating controls (bottom) -->
     <div class="floating-controls">
-      <div class="quick-locale-controls" id="quick-locale-controls">
-        <div class="quick-row" id="quick-my-row">
-          <select id="quick-my-language" class="quick-select quick-language-select" title="My Language"></select>
-          <select id="quick-my-voice" class="quick-select quick-voice" title="My Voice"></select>
-        </div>
-        <div class="quick-row" id="quick-meeting-row" style="display:none;">
-          <select id="quick-meeting-language" class="quick-select quick-language-select" title="Meeting Language"></select>
-          <select id="quick-meeting-voice" class="quick-select quick-voice" title="Meeting Voice"></select>
-        </div>
-      </div>
       <div class="font-controls">
         <button id="btn-font-down" class="float-btn" title="Decrease font size">A−</button>
         <span id="font-size-display" class="font-size-label">16</span>
@@ -381,6 +384,16 @@
                   <option value="ja-JP-NanamiNeural">Nanami — 女性 🇯🇵</option>
                   <option value="ko-KR-SunHiNeural">SunHi — 여성 🇰🇷</option>
                   <option value="zh-CN-XiaoxiaoNeural">Xiaoxiao — 女声 🇨🇳</option>
+                  <option value="fr-FR-DeniseNeural">Denise — Female 🇫🇷</option>
+                  <option value="fr-FR-HenriNeural">Henri — Male 🇫🇷</option>
+                  <option value="de-DE-KatjaNeural">Katja — Female 🇩🇪</option>
+                  <option value="de-DE-ConradNeural">Conrad — Male 🇩🇪</option>
+                  <option value="es-ES-ElviraNeural">Elvira — Female 🇪🇸</option>
+                  <option value="es-ES-AlvaroNeural">Alvaro — Male 🇪🇸</option>
+                  <option value="th-TH-PremwadeeNeural">Premwadee — Female 🇹🇭</option>
+                  <option value="th-TH-NiwatNeural">Niwat — Male 🇹🇭</option>
+                  <option value="id-ID-GadisNeural">Gadis — Female 🇮🇩</option>
+                  <option value="id-ID-ArdiNeural">Ardi — Male 🇮🇩</option>
                 </select>
               </div>
               <div class="slider-field" style="margin-top:8px;">
@@ -492,6 +505,16 @@
                   <option value="ja-JP-NanamiNeural">Nanami — 女性 🇯🇵</option>
                   <option value="ko-KR-SunHiNeural">SunHi — 여성 🇰🇷</option>
                   <option value="zh-CN-XiaoxiaoNeural">Xiaoxiao — 女声 🇨🇳</option>
+                  <option value="fr-FR-DeniseNeural">Denise — Female 🇫🇷</option>
+                  <option value="fr-FR-HenriNeural">Henri — Male 🇫🇷</option>
+                  <option value="de-DE-KatjaNeural">Katja — Female 🇩🇪</option>
+                  <option value="de-DE-ConradNeural">Conrad — Male 🇩🇪</option>
+                  <option value="es-ES-ElviraNeural">Elvira — Female 🇪🇸</option>
+                  <option value="es-ES-AlvaroNeural">Alvaro — Male 🇪🇸</option>
+                  <option value="th-TH-PremwadeeNeural">Premwadee — Female 🇹🇭</option>
+                  <option value="th-TH-NiwatNeural">Niwat — Male 🇹🇭</option>
+                  <option value="id-ID-GadisNeural">Gadis — Female 🇮🇩</option>
+                  <option value="id-ID-ArdiNeural">Ardi — Male 🇮🇩</option>
                 </select>
               </div>
               <div class="slider-field" style="margin-top:8px;">
