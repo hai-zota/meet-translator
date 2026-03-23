@@ -14,6 +14,8 @@ const DEFAULT_SETTINGS = {
   font_size: 16,
   max_lines: 5,
   show_original: true,
+  stream_a_color: '#00a2ff',
+  stream_b_color: '#4ce87d',
   translation_mode: 'soniox',
   custom_context: null,
   elevenlabs_api_key: '',

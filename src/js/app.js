@@ -353,6 +353,13 @@ class App {
             document.getElementById('max-lines-value').textContent = e.target.value;
         });
 
+        document.getElementById('input-stream-a-color')?.addEventListener('input', (e) => {
+            this.transcriptUI.configure({ streamAColor: e.target.value || '#00a2ff' });
+        });
+        document.getElementById('input-stream-b-color')?.addEventListener('input', (e) => {
+            this.transcriptUI.configure({ streamBColor: e.target.value || '#4ce87d' });
+        });
+
         // Toggle ElevenLabs API key visibility
         document.getElementById('btn-toggle-elevenlabs-key')?.addEventListener('click', () => {
             const input = document.getElementById('input-elevenlabs-key');
@@ -516,6 +523,9 @@ class App {
 
         sonioxClient.onStatusChange = (status) => {
             this._updateStatus(status);
+        };
+        sonioxClient.onRecovered = () => {
+            this.transcriptUI.clearPendingAfterReconnect();
         };
 
         sonioxClient.onError = (error) => {
@@ -1222,6 +1232,10 @@ class App {
         document.getElementById('max-lines-value').textContent = s.max_lines || 5;
 
         document.getElementById('check-show-original').checked = s.show_original !== false;
+        const streamAColorInput = document.getElementById('input-stream-a-color');
+        if (streamAColorInput) streamAColorInput.value = s.stream_a_color || '#00a2ff';
+        const streamBColorInput = document.getElementById('input-stream-b-color');
+        if (streamBColorInput) streamBColorInput.value = s.stream_b_color || '#4ce87d';
 
         // Custom context
         const ctx = s.custom_context;
@@ -1389,6 +1403,8 @@ class App {
             font_size: parseInt(document.getElementById('range-font-size').value),
             max_lines: parseInt(document.getElementById('range-max-lines').value),
             show_original: document.getElementById('check-show-original').checked,
+            stream_a_color: document.getElementById('input-stream-a-color')?.value || prevSettings.stream_a_color || '#00a2ff',
+            stream_b_color: document.getElementById('input-stream-b-color')?.value || prevSettings.stream_b_color || '#4ce87d',
             custom_context: null,
         };
 
@@ -1532,6 +1548,8 @@ class App {
                 maxLines: settings.max_lines || 5,
                 showOriginal: settings.show_original !== false,
                 fontSize: settings.font_size || 16,
+                streamAColor: settings.stream_a_color || '#00a2ff',
+                streamBColor: settings.stream_b_color || '#4ce87d',
             });
         }
 
@@ -2962,6 +2980,10 @@ class App {
             this._isRunActive(runId) && this.transcriptUI.setProvisionalForStream('A', text || '', speaker);
         this.sonioxClientA.onStatusChange = (status) => this._updateDualStreamStatus('A', status, runId);
         this.sonioxClientA.onError = (err) => this._handleDualStreamError('A', err, runId);
+        this.sonioxClientA.onRecovered = () => {
+            if (!this._isRunActive(runId)) return;
+            this.transcriptUI.clearPendingAfterReconnect('A');
+        };
 
         // Wire Stream B callbacks
         this.sonioxClientB.onOriginal = (text, speaker) =>
@@ -2987,6 +3009,10 @@ class App {
             this._isRunActive(runId) && this.transcriptUI.setProvisionalForStream('B', text || '', speaker);
         this.sonioxClientB.onStatusChange = (status) => this._updateDualStreamStatus('B', status, runId);
         this.sonioxClientB.onError = (err) => this._handleDualStreamError('B', err, runId);
+        this.sonioxClientB.onRecovered = () => {
+            if (!this._isRunActive(runId)) return;
+            this.transcriptUI.clearPendingAfterReconnect('B');
+        };
 
         // Connect both Soniox sessions
         this.sonioxClientA.connect({

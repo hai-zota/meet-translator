@@ -64,6 +64,10 @@ pub struct Settings {
     pub max_lines: u32,
     /// Whether to show original text alongside translation
     pub show_original: bool,
+    /// Transcript color for Stream A in dual mode (hex)
+    pub stream_a_color: String,
+    /// Transcript color for Stream B in dual mode (hex)
+    pub stream_b_color: String,
     /// Translation mode: "soniox" (cloud API) or "local" (MLX models)
     pub translation_mode: String,
     /// Optional custom context for better transcription
@@ -133,6 +137,8 @@ impl Default for Settings {
             font_size: 16,
             max_lines: 5,
             show_original: true,
+            stream_a_color: "#00a2ff".to_string(),
+            stream_b_color: "#4ce87d".to_string(),
             translation_mode: "soniox".to_string(),
             custom_context: None,
             elevenlabs_api_key: String::new(),

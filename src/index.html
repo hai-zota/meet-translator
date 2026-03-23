@@ -139,6 +139,11 @@
       </div>
     </div>
 
+    <div class="dual-stream-label-bar" data-tauri-drag-region>
+      <div class="dual-stream-label dual-stream-label-a">🔊 Stream A</div>
+      <div class="dual-stream-label dual-stream-label-b">🎤 Stream B</div>
+    </div>
+
     <!-- Transcript Area -->
     <div id="transcript-container" data-tauri-drag-region>
       <div id="transcript-content" data-tauri-drag-region>
@@ -274,6 +279,16 @@
             <input type="checkbox" id="check-show-original" checked />
             <span class="checkbox-label">Show original text</span>
           </label>
+          <div class="field-row" style="margin-top: 10px; gap: 10px;">
+            <div class="field" style="flex:1;">
+              <span class="field-label">Stream A Color</span>
+              <input type="color" id="input-stream-a-color" value="#00a2ff" style="width:100%;height:34px;border:none;background:transparent;padding:0;" />
+            </div>
+            <div class="field" style="flex:1;">
+              <span class="field-label">Stream B Color</span>
+              <input type="color" id="input-stream-b-color" value="#4ce87d" style="width:100%;height:34px;border:none;background:transparent;padding:0;" />
+            </div>
+          </div>
         </div>
       </div>
 

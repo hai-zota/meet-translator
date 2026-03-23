@@ -32,19 +32,29 @@ export class TranscriptUI {
     /**
      * Update display settings
      */
-    configure({ maxLines, showOriginal, fontSize, fontColor, viewMode }) {
+    configure({ maxLines, showOriginal, fontSize, fontColor, viewMode, streamAColor, streamBColor }) {
+        const overlay = document.getElementById('overlay-view');
         if (maxLines !== undefined) this.maxChars = maxLines * 160;
         if (fontSize !== undefined) {
             this.fontSize = fontSize;
             this.container.style.setProperty('--transcript-font-size', `${fontSize}px`);
+            if (overlay) overlay.style.setProperty('--transcript-font-size', `${fontSize}px`);
         }
         if (fontColor !== undefined) {
             this.fontColor = fontColor;
             this.container.style.setProperty('--transcript-font-color', fontColor);
+            if (overlay) overlay.style.setProperty('--transcript-font-color', fontColor);
+        }
+        if (streamAColor !== undefined) {
+            this.container.style.setProperty('--stream-a-color', streamAColor);
+            if (overlay) overlay.style.setProperty('--stream-a-color', streamAColor);
+        }
+        if (streamBColor !== undefined) {
+            this.container.style.setProperty('--stream-b-color', streamBColor);
+            if (overlay) overlay.style.setProperty('--stream-b-color', streamBColor);
         }
         if (viewMode !== undefined) {
             this.viewMode = viewMode;
-            const overlay = document.getElementById('overlay-view');
             if (overlay) {
                 overlay.classList.toggle('dual-view', viewMode === 'dual');
             }
@@ -152,6 +162,30 @@ export class TranscriptUI {
      * Clear provisional text
      */
     clearProvisional() {
+        this.provisionalText = '';
+        this.provisionalSpeaker = null;
+        this._render();
+    }
+
+    /**
+     * Clear stale pending placeholders after reconnect success.
+     * stream: 'A' | 'B' | null (single stream)
+     */
+    clearPendingAfterReconnect(stream = null) {
+        if (stream === 'A') {
+            this.segmentsA = this.segmentsA.filter((seg) => seg.status === 'translated');
+            this.provisionalA = { text: '', speaker: null };
+            this._render();
+            return;
+        }
+        if (stream === 'B') {
+            this.segmentsB = this.segmentsB.filter((seg) => seg.status === 'translated');
+            this.provisionalB = { text: '', speaker: null };
+            this._render();
+            return;
+        }
+
+        this.segments = this.segments.filter((seg) => seg.status === 'translated');
         this.provisionalText = '';
         this.provisionalSpeaker = null;
         this._render();

@@ -1,7 +1,7 @@
 /**
  * Soniox WebSocket Client
  * Connects directly to wss://stt-rt.soniox.com/transcribe-websocket
- * 
+ *
  * Features:
  * - Auto-reconnect on transient errors
  * - Seamless session reset every SESSION_DURATION_MS (make-before-break)
@@ -44,6 +44,7 @@ export class SonioxClient {
         this.onProvisional = null;    // (text, speaker) => {}
         this.onStatusChange = null;   // (status) => {}
         this.onError = null;          // (error) => {}
+        this.onRecovered = null;      // () => {}
     }
 
     /**
@@ -85,6 +86,7 @@ export class SonioxClient {
         }
 
         newWs.onopen = () => {
+            const wasRecovering = this._reconnectAttempts > 0;
             console.log('[Soniox] WebSocket OPEN');
 
             // Build config message
@@ -146,6 +148,10 @@ export class SonioxClient {
             this._clearReconnectTimer();
             this._setStatus('connected');
             console.log('[Soniox] Connected and config sent');
+
+            if (wasRecovering) {
+                this.onRecovered?.();
+            }
 
             // Start session timer
             this._startSessionTimer();
@@ -414,7 +420,9 @@ export class SonioxClient {
         console.log(`Reconnecting (${this._reconnectAttempts}/${MAX_RECONNECT}) in ${delay}ms...`);
         this._setStatus('connecting');
         const now = Date.now();
-        if (now - this._lastTransientNotifyTs > TRANSIENT_ERROR_NOTIFY_COOLDOWN_MS) {
+        const isRequestTimeout = /request timeout/i.test(reason || '');
+        const canNotifyTimeout = !isRequestTimeout || this._reconnectAttempts >= 3;
+        if (canNotifyTimeout && now - this._lastTransientNotifyTs > TRANSIENT_ERROR_NOTIFY_COOLDOWN_MS) {
             this._lastTransientNotifyTs = now;
             this.onError?.(`${reason}. Reconnecting (${this._reconnectAttempts}/${MAX_RECONNECT})...`);
         }
