@@ -1,7 +1,8 @@
+use crate::audio::inject_player::{InjectPlayer, InjectPlayerState};
 use crate::audio::microphone::MicCapture;
 use crate::audio::SystemAudioCapture;
 use base64::Engine as _;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, HostTrait};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -289,187 +290,17 @@ pub async fn inject_pcm_to_device(
     device_name: String,
     pcm_data: Vec<u8>,
     sample_rate: u32,
+    state: State<'_, InjectPlayerState>,
 ) -> Result<(), String> {
-    if pcm_data.is_empty() {
-        return Err("Empty PCM payload".to_string());
-    }
-    if pcm_data.len() % 2 != 0 {
-        return Err("Invalid PCM payload (expected s16le)".to_string());
-    }
+    let player = state.player.lock().map_err(|_| "lock error".to_string())?;
+    player.play_pcm(device_name, pcm_data, sample_rate)
+}
 
-    let host = cpal::default_host();
-    let requested = device_name.to_lowercase();
-    let mut devices = host
-        .output_devices()
-        .map_err(|e| format!("Failed to enumerate output devices: {}", e))?;
-
-    let mut all_names: Vec<String> = Vec::new();
-    let mut matched_exact: Option<cpal::Device> = None;
-    let mut matched_contains: Option<cpal::Device> = None;
-
-    for d in devices.by_ref() {
-        let name = d.name().unwrap_or_else(|_| "<unknown>".to_string());
-        all_names.push(name.clone());
-        let n = name.to_lowercase();
-        if matched_exact.is_none() && n == requested {
-            matched_exact = Some(d);
-            continue;
-        }
-        if matched_contains.is_none() && n.contains(&requested) {
-            matched_contains = Some(d);
-        }
-    }
-
-    let device = matched_exact.or(matched_contains).ok_or_else(|| {
-        format!(
-            "Output device not found: {}. Available outputs: {}",
-            device_name,
-            all_names.join(", ")
-        )
-    })?;
-
-    let supported = device
-        .default_output_config()
-        .map_err(|e| format!("Failed to get output config: {}", e))?;
-
-    let out_rate = supported.sample_rate().0;
-    let out_channels = supported.channels();
-
-    let input_i16: Vec<i16> = pcm_data
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]))
-        .collect();
-
-    let output_f32 = resample_mono_i16_to_interleaved_f32(
-        &input_i16,
-        sample_rate.max(1),
-        out_rate.max(1),
-        out_channels.max(1),
-    );
-
-    let samples = Arc::new(output_f32);
-    let index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-    let err_fn = |_err| {};
-    let stream_config: cpal::StreamConfig = supported.clone().into();
-
-    let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => {
-            let samples = Arc::clone(&samples);
-            let index = Arc::clone(&index);
-            device
-                .build_output_stream(
-                    &stream_config,
-                    move |output: &mut [f32], _| {
-                        write_samples_f32(output, &samples, &index);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| format!("Failed to build f32 output stream: {}", e))?
-        }
-        cpal::SampleFormat::I16 => {
-            let samples = Arc::clone(&samples);
-            let index = Arc::clone(&index);
-            device
-                .build_output_stream(
-                    &stream_config,
-                    move |output: &mut [i16], _| {
-                        write_samples_i16(output, &samples, &index);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| format!("Failed to build i16 output stream: {}", e))?
-        }
-        cpal::SampleFormat::U16 => {
-            let samples = Arc::clone(&samples);
-            let index = Arc::clone(&index);
-            device
-                .build_output_stream(
-                    &stream_config,
-                    move |output: &mut [u16], _| {
-                        write_samples_u16(output, &samples, &index);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| format!("Failed to build u16 output stream: {}", e))?
-        }
-        _ => return Err("Unsupported output sample format".to_string()),
-    };
-
-    stream
-        .play()
-        .map_err(|e| format!("Failed to play output stream: {}", e))?;
-
-    // Keep stream alive in this thread until all samples are consumed.
-    while index.load(Ordering::SeqCst) < samples.len() {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    drop(stream);
-
+#[tauri::command]
+pub fn stop_inject_audio(state: State<'_, InjectPlayerState>) -> Result<(), String> {
+    let player = state.player.lock().map_err(|_| "lock error".to_string())?;
+    drop(player);
+    let mut guard = state.player.lock().map_err(|_| "lock error".to_string())?;
+    *guard = InjectPlayer::new();
     Ok(())
-}
-
-fn resample_mono_i16_to_interleaved_f32(
-    input: &[i16],
-    in_rate: u32,
-    out_rate: u32,
-    out_channels: u16,
-) -> Vec<f32> {
-    if input.is_empty() {
-        return Vec::new();
-    }
-
-    let ratio = in_rate as f64 / out_rate as f64;
-    let out_frames = ((input.len() as f64) / ratio).max(1.0) as usize;
-    let mut out = Vec::with_capacity(out_frames * out_channels as usize);
-
-    for i in 0..out_frames {
-        let src_idx = ((i as f64) * ratio).floor() as usize;
-        let clamped_idx = src_idx.min(input.len().saturating_sub(1));
-        let sample = (input[clamped_idx] as f32) / 32768.0;
-        for _ in 0..out_channels {
-            out.push(sample);
-        }
-    }
-
-    out
-}
-
-fn write_samples_f32(
-    output: &mut [f32],
-    samples: &Arc<Vec<f32>>,
-    index: &Arc<std::sync::atomic::AtomicUsize>,
-) {
-    for sample in output.iter_mut() {
-        let i = index.fetch_add(1, Ordering::SeqCst);
-        *sample = if i < samples.len() { samples[i] } else { 0.0 };
-    }
-}
-
-fn write_samples_i16(
-    output: &mut [i16],
-    samples: &Arc<Vec<f32>>,
-    index: &Arc<std::sync::atomic::AtomicUsize>,
-) {
-    for sample in output.iter_mut() {
-        let i = index.fetch_add(1, Ordering::SeqCst);
-        let v = if i < samples.len() { samples[i] } else { 0.0 };
-        *sample = (v.clamp(-1.0, 1.0) * 32767.0) as i16;
-    }
-}
-
-fn write_samples_u16(
-    output: &mut [u16],
-    samples: &Arc<Vec<f32>>,
-    index: &Arc<std::sync::atomic::AtomicUsize>,
-) {
-    for sample in output.iter_mut() {
-        let i = index.fetch_add(1, Ordering::SeqCst);
-        let v = if i < samples.len() { samples[i] } else { 0.0 };
-        *sample = ((v.clamp(-1.0, 1.0) * 0.5 + 0.5) * (u16::MAX as f32)) as u16;
-    }
 }

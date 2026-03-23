@@ -23,6 +23,8 @@ const DEFAULT_SETTINGS = {
   tts_speed: 1.2,
   edge_tts_voice: 'vi-VN-HoaiMyNeural',
   edge_tts_speed: 50,
+  google_tts_voice: 'vi-VN-Chirp3-HD-Aoede',
+  google_tts_speed: 1.0,
   tts_auto_read: true,
   // Dual mode
   dual_mode_enabled: false,
@@ -30,6 +32,8 @@ const DEFAULT_SETTINGS = {
   stream_a_language_target: 'vi',
   stream_a_tts_enabled: true,
   stream_a_translated_volume: 1.0,
+  stream_a_google_tts_voice: 'vi-VN-Chirp3-HD-Aoede',
+  stream_a_google_tts_speed: 1.0,
   stream_b_language_source: 'auto',
   stream_b_language_target: 'en',
   stream_b_tts_enabled: true,
@@ -39,6 +43,8 @@ const DEFAULT_SETTINGS = {
   stream_b_translated_volume: 1.0,
   stream_b_edge_tts_voice: 'vi-VN-HoaiMyNeural',
   stream_b_edge_tts_speed: 50,
+  stream_b_google_tts_voice: 'vi-VN-Chirp3-HD-Aoede',
+  stream_b_google_tts_speed: 1.0,
   // Smart Audio Mixer & Ducking
   mixer: {
     enabled: true,

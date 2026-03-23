@@ -1,4 +1,5 @@
 pub mod microphone;
+pub mod inject_player;
 pub mod mixer;
 pub mod tts_player;
 

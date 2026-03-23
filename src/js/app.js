@@ -424,6 +424,18 @@ class App {
             if (label) label.textContent = (v >= 0 ? '+' : '') + v + '%';
         });
 
+        document.getElementById('range-stream-a-google-speed')?.addEventListener('input', (e) => {
+            const label = document.getElementById('stream-a-google-speed-value');
+            const v = parseFloat(e.target.value);
+            if (label) label.textContent = `${v.toFixed(1)}x`;
+        });
+
+        document.getElementById('range-stream-b-google-speed')?.addEventListener('input', (e) => {
+            const label = document.getElementById('stream-b-google-speed-value');
+            const v = parseFloat(e.target.value);
+            if (label) label.textContent = `${v.toFixed(1)}x`;
+        });
+
         document.getElementById('range-stream-a-translated-volume')?.addEventListener('input', (e) => {
             const label = document.getElementById('stream-a-translated-volume-value');
             const v = parseInt(e.target.value, 10);
@@ -944,10 +956,12 @@ class App {
             prev.stream_a_edge_tts_voice !== next.stream_a_edge_tts_voice ||
             prev.stream_a_edge_tts_speed !== next.stream_a_edge_tts_speed ||
             prev.stream_a_google_tts_voice !== next.stream_a_google_tts_voice ||
+            prev.stream_a_google_tts_speed !== next.stream_a_google_tts_speed ||
             prev.stream_a_elevenlabs_voice_id !== next.stream_a_elevenlabs_voice_id ||
             prev.stream_b_edge_tts_voice !== next.stream_b_edge_tts_voice ||
             prev.stream_b_edge_tts_speed !== next.stream_b_edge_tts_speed ||
             prev.stream_b_google_tts_voice !== next.stream_b_google_tts_voice ||
+            prev.stream_b_google_tts_speed !== next.stream_b_google_tts_speed ||
             prev.stream_b_elevenlabs_voice_id !== next.stream_b_elevenlabs_voice_id;
 
         // Apply TTS provider/voice changes immediately for ongoing narration.
@@ -1195,12 +1209,26 @@ class App {
         if (streamASpeedLabel) streamASpeedLabel.textContent = (streamASpeed >= 0 ? '+' : '') + streamASpeed + '%';
         const streamAGoogleVoice = document.getElementById('select-stream-a-google-voice');
         if (streamAGoogleVoice) streamAGoogleVoice.value = s.stream_a_google_tts_voice || s.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+        const streamAGoogleSpeedSlider = document.getElementById('range-stream-a-google-speed');
+        const streamAGoogleSpeedLabel = document.getElementById('stream-a-google-speed-value');
+        const streamAGoogleSpeed = s.stream_a_google_tts_speed !== undefined
+            ? s.stream_a_google_tts_speed
+            : (s.google_tts_speed !== undefined ? s.google_tts_speed : 1.0);
+        if (streamAGoogleSpeedSlider) streamAGoogleSpeedSlider.value = streamAGoogleSpeed;
+        if (streamAGoogleSpeedLabel) streamAGoogleSpeedLabel.textContent = `${Number(streamAGoogleSpeed).toFixed(1)}x`;
         const streamAElevenLabsVoice = document.getElementById('select-stream-a-elevenlabs-voice');
         if (streamAElevenLabsVoice) streamAElevenLabsVoice.value = s.stream_a_elevenlabs_voice_id || s.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
 
         // Stream B additional voices (google + elevenlabs)
         const streamBGoogleVoice = document.getElementById('select-stream-b-google-voice');
         if (streamBGoogleVoice) streamBGoogleVoice.value = s.stream_b_google_tts_voice || s.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede';
+        const streamBGoogleSpeedSlider = document.getElementById('range-stream-b-google-speed');
+        const streamBGoogleSpeedLabel = document.getElementById('stream-b-google-speed-value');
+        const streamBGoogleSpeed = s.stream_b_google_tts_speed !== undefined
+            ? s.stream_b_google_tts_speed
+            : (s.google_tts_speed !== undefined ? s.google_tts_speed : 1.0);
+        if (streamBGoogleSpeedSlider) streamBGoogleSpeedSlider.value = streamBGoogleSpeed;
+        if (streamBGoogleSpeedLabel) streamBGoogleSpeedLabel.textContent = `${Number(streamBGoogleSpeed).toFixed(1)}x`;
         const streamBElevenLabsVoice = document.getElementById('select-stream-b-elevenlabs-voice');
         if (streamBElevenLabsVoice) streamBElevenLabsVoice.value = s.stream_b_elevenlabs_voice_id || s.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
         this._syncTranslationVoiceOptions(s);
@@ -1296,7 +1324,12 @@ class App {
             || prevSettings.stream_a_google_tts_voice
             || prevSettings.google_tts_voice
             || 'vi-VN-Chirp3-HD-Aoede';
-        settings.google_tts_speed = prevSettings.google_tts_speed !== undefined ? prevSettings.google_tts_speed : 1.0;
+        settings.google_tts_speed = parseFloat(
+            document.getElementById('range-stream-a-google-speed')?.value
+            ?? prevSettings.stream_a_google_tts_speed
+            ?? prevSettings.google_tts_speed
+            ?? 1.0
+        );
         settings.tts_enabled = this.ttsEnabled;
 
         // Dual mode settings
@@ -1341,12 +1374,22 @@ class App {
         settings.stream_a_google_tts_voice = document.getElementById('select-stream-a-google-voice')?.value
             || settings.google_tts_voice
             || 'vi-VN-Chirp3-HD-Aoede';
+        settings.stream_a_google_tts_speed = parseFloat(
+            document.getElementById('range-stream-a-google-speed')?.value
+            ?? settings.google_tts_speed
+            ?? 1.0
+        );
         settings.stream_a_elevenlabs_voice_id = document.getElementById('select-stream-a-elevenlabs-voice')?.value
             || settings.tts_voice_id
             || '21m00Tcm4TlvDq8ikWAM';
         settings.stream_b_google_tts_voice = document.getElementById('select-stream-b-google-voice')?.value
             || settings.google_tts_voice
             || 'vi-VN-Chirp3-HD-Aoede';
+        settings.stream_b_google_tts_speed = parseFloat(
+            document.getElementById('range-stream-b-google-speed')?.value
+            ?? settings.google_tts_speed
+            ?? 1.0
+        );
         settings.stream_b_elevenlabs_voice_id = document.getElementById('select-stream-b-elevenlabs-voice')?.value
             || settings.tts_voice_id
             || '21m00Tcm4TlvDq8ikWAM';
@@ -1416,6 +1459,9 @@ class App {
                     ? settings.stream_a_edge_tts_speed
                     : (settings.edge_tts_speed !== undefined ? settings.edge_tts_speed : 20),
                 googleVoice: settings.stream_a_google_tts_voice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede',
+                googleSpeed: settings.stream_a_google_tts_speed !== undefined
+                    ? settings.stream_a_google_tts_speed
+                    : (settings.google_tts_speed !== undefined ? settings.google_tts_speed : 1.0),
                 elevenLabsVoiceId: settings.stream_a_elevenlabs_voice_id || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM',
             },
             streamB: {
@@ -1435,6 +1481,9 @@ class App {
                     ? settings.stream_b_edge_tts_speed
                     : (settings.edge_tts_speed !== undefined ? settings.edge_tts_speed : 20),
                 googleVoice: settings.stream_b_google_tts_voice || settings.google_tts_voice || 'vi-VN-Chirp3-HD-Aoede',
+                googleSpeed: settings.stream_b_google_tts_speed !== undefined
+                    ? settings.stream_b_google_tts_speed
+                    : (settings.google_tts_speed !== undefined ? settings.google_tts_speed : 1.0),
                 elevenLabsVoiceId: settings.stream_b_elevenlabs_voice_id || settings.tts_voice_id || '21m00Tcm4TlvDq8ikWAM',
             },
         };
@@ -1528,7 +1577,7 @@ class App {
                 apiKey: settings.google_tts_api_key,
                 voice: voice,
                 languageCode: langCode,
-                speakingRate: settings.google_tts_speed || 1.0,
+                speakingRate: cfg?.googleSpeed || settings.google_tts_speed || 1.0,
             });
         } else {
             tts.configure({
@@ -1927,7 +1976,7 @@ class App {
                     body: JSON.stringify({
                         input: { text },
                         voice: { languageCode: langCode, name: voice },
-                        audioConfig: { audioEncoding: 'MP3', speakingRate: s.google_tts_speed || 1.0 },
+                        audioConfig: { audioEncoding: 'MP3', speakingRate: cfg?.googleSpeed || s.google_tts_speed || 1.0 },
                     }),
                 }
             );
@@ -2507,6 +2556,12 @@ class App {
             await invoke('stop_capture');
         } catch (err) {
             console.error('Failed to stop audio capture:', err);
+        }
+
+        try {
+            await invoke('stop_inject_audio');
+        } catch (err) {
+            console.error('Failed to stop inject audio:', err);
         }
 
         if (this.translationMode === 'local') {
