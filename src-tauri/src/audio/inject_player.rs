@@ -3,11 +3,18 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+#[derive(Clone, Copy)]
+pub enum InjectChannel {
+    Original,
+    Translated,
+}
+
 pub enum InjectCommand {
     Play {
         device_name: String,
         pcm_data: Vec<u8>,
         sample_rate: u32,
+        channel: InjectChannel,
     },
     Shutdown,
 }
@@ -31,6 +38,7 @@ impl InjectPlayer {
                             device_name,
                             pcm_data,
                             sample_rate,
+                            channel,
                         } => {
                             let needs_rebuild = active_output
                                 .as_ref()
@@ -49,7 +57,9 @@ impl InjectPlayer {
                             }
 
                             if let Some(output) = active_output.as_mut() {
-                                if let Err(err) = output.enqueue_pcm(&pcm_data, sample_rate) {
+                                if let Err(err) =
+                                    output.enqueue_pcm(&pcm_data, sample_rate, channel)
+                                {
                                     eprintln!("[InjectPlayer] playback error: {}", err);
                                     active_output = None;
                                 }
@@ -67,14 +77,18 @@ impl InjectPlayer {
     pub fn play_pcm(
         &self,
         device_name: String,
-        pcm_data: Vec<u8>,
+        mut pcm_data: Vec<u8>,
         sample_rate: u32,
+        channel: InjectChannel,
     ) -> Result<(), String> {
         if pcm_data.is_empty() {
-            return Err("Empty PCM payload".to_string());
+            return Ok(());
         }
         if pcm_data.len() % 2 != 0 {
-            return Err("Invalid PCM payload (expected s16le)".to_string());
+            pcm_data.pop();
+            if pcm_data.is_empty() {
+                return Ok(());
+            }
         }
 
         self.tx
@@ -82,8 +96,32 @@ impl InjectPlayer {
                 device_name,
                 pcm_data,
                 sample_rate,
+                channel,
             })
             .map_err(|_| "Inject player thread stopped".to_string())
+    }
+
+    pub fn play_original_pcm(
+        &self,
+        device_name: String,
+        pcm_data: Vec<u8>,
+        sample_rate: u32,
+    ) -> Result<(), String> {
+        self.play_pcm(device_name, pcm_data, sample_rate, InjectChannel::Original)
+    }
+
+    pub fn play_translated_pcm(
+        &self,
+        device_name: String,
+        pcm_data: Vec<u8>,
+        sample_rate: u32,
+    ) -> Result<(), String> {
+        self.play_pcm(
+            device_name,
+            pcm_data,
+            sample_rate,
+            InjectChannel::Translated,
+        )
     }
 }
 
@@ -102,8 +140,15 @@ struct ActiveOutput {
     out_rate: u32,
     out_channels: u16,
     max_buffered_samples: usize,
-    queue: Arc<Mutex<VecDeque<f32>>>,
+    queues: Arc<Mutex<MixQueues>>,
     _stream: cpal::Stream,
+}
+
+struct MixQueues {
+    original: VecDeque<f32>,
+    translated: VecDeque<f32>,
+    duck_gain: f32,
+    translated_env: f32,
 }
 
 impl ActiveOutput {
@@ -116,7 +161,12 @@ impl ActiveOutput {
         let out_rate = supported.sample_rate().0.max(1);
         let out_channels = supported.channels().max(1);
         let max_buffered_samples = out_rate as usize * out_channels as usize * 5;
-        let queue = Arc::new(Mutex::new(VecDeque::with_capacity(max_buffered_samples.min(65536))));
+        let queues = Arc::new(Mutex::new(MixQueues {
+            original: VecDeque::with_capacity(max_buffered_samples.min(65536)),
+            translated: VecDeque::with_capacity(max_buffered_samples.min(65536)),
+            duck_gain: 1.0,
+            translated_env: 0.0,
+        }));
 
         let err_fn = |err| {
             eprintln!("[InjectPlayer] output stream error: {}", err);
@@ -125,12 +175,12 @@ impl ActiveOutput {
 
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => {
-                let queue = Arc::clone(&queue);
+                let queues = Arc::clone(&queues);
                 device
                     .build_output_stream(
                         &stream_config,
                         move |output: &mut [f32], _| {
-                            write_samples_f32(output, &queue);
+                            write_samples_f32(output, &queues);
                         },
                         err_fn,
                         None,
@@ -138,12 +188,12 @@ impl ActiveOutput {
                     .map_err(|e| format!("Failed to build f32 output stream: {}", e))?
             }
             cpal::SampleFormat::I16 => {
-                let queue = Arc::clone(&queue);
+                let queues = Arc::clone(&queues);
                 device
                     .build_output_stream(
                         &stream_config,
                         move |output: &mut [i16], _| {
-                            write_samples_i16(output, &queue);
+                            write_samples_i16(output, &queues);
                         },
                         err_fn,
                         None,
@@ -151,12 +201,12 @@ impl ActiveOutput {
                     .map_err(|e| format!("Failed to build i16 output stream: {}", e))?
             }
             cpal::SampleFormat::U16 => {
-                let queue = Arc::clone(&queue);
+                let queues = Arc::clone(&queues);
                 device
                     .build_output_stream(
                         &stream_config,
                         move |output: &mut [u16], _| {
-                            write_samples_u16(output, &queue);
+                            write_samples_u16(output, &queues);
                         },
                         err_fn,
                         None,
@@ -175,12 +225,17 @@ impl ActiveOutput {
             out_rate,
             out_channels,
             max_buffered_samples,
-            queue,
+            queues,
             _stream: stream,
         })
     }
 
-    fn enqueue_pcm(&mut self, pcm_data: &[u8], input_rate: u32) -> Result<(), String> {
+    fn enqueue_pcm(
+        &mut self,
+        pcm_data: &[u8],
+        input_rate: u32,
+        channel: InjectChannel,
+    ) -> Result<(), String> {
         let input_i16: Vec<i16> = pcm_data
             .chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
@@ -197,20 +252,25 @@ impl ActiveOutput {
             self.out_channels,
         );
 
-        let mut queue = self
-            .queue
+        let mut queues = self
+            .queues
             .lock()
-            .map_err(|_| "Inject queue lock poisoned".to_string())?;
+            .map_err(|_| "Inject mix queue lock poisoned".to_string())?;
 
-        let overflow = queue
+        let target = match channel {
+            InjectChannel::Original => &mut queues.original,
+            InjectChannel::Translated => &mut queues.translated,
+        };
+
+        let overflow = target
             .len()
             .saturating_add(output_f32.len())
             .saturating_sub(self.max_buffered_samples);
         if overflow > 0 {
-            queue.drain(..overflow);
+            target.drain(..overflow);
         }
 
-        queue.extend(output_f32);
+        target.extend(output_f32);
         Ok(())
     }
 }
@@ -263,7 +323,8 @@ fn resample_mono_i16_to_interleaved_f32(
         return vec![sample; out_channels as usize];
     }
 
-    let out_frames = ((input.len() as f64) * (out_rate as f64) / (in_rate as f64)).max(1.0) as usize;
+    let out_frames =
+        ((input.len() as f64) * (out_rate as f64) / (in_rate as f64)).max(1.0) as usize;
     let mut out = Vec::with_capacity(out_frames * out_channels as usize);
 
     for frame_idx in 0..out_frames {
@@ -284,8 +345,39 @@ fn resample_mono_i16_to_interleaved_f32(
     out
 }
 
-fn write_samples_f32(output: &mut [f32], queue: &Arc<Mutex<VecDeque<f32>>>) {
-    let mut guard = match queue.lock() {
+fn pop_mixed_sample(queues: &mut MixQueues) -> f32 {
+    let translated = queues.translated.pop_front().unwrap_or(0.0);
+    let original = queues.original.pop_front().unwrap_or(0.0);
+    let translated_queue_has_more = !queues.translated.is_empty();
+
+    // Envelope avoids per-sample flicker at zero-crossings while translated is still flowing.
+    let abs_translated = translated.abs();
+    if translated_queue_has_more {
+        queues.translated_env = (queues.translated_env * 0.98) + (abs_translated * 0.02);
+    } else {
+        // Hard reset as soon as translated stream is drained.
+        queues.translated_env = 0.0;
+    }
+
+    let translated_active =
+        translated_queue_has_more && (abs_translated > 0.003 || queues.translated_env > 0.0035);
+    let target_gain = if translated_active { 0.30 } else { 1.0 };
+
+    // Requirement:
+    // - translated starts -> fade original down to 30%
+    // - translated ends   -> return original to 100% immediately
+    if translated_active {
+        queues.duck_gain = (queues.duck_gain - 0.00012).max(target_gain);
+    } else {
+        queues.duck_gain = 1.0;
+    }
+
+    let mixed = translated + (original * queues.duck_gain);
+    mixed.tanh().clamp(-1.0, 1.0)
+}
+
+fn write_samples_f32(output: &mut [f32], queues: &Arc<Mutex<MixQueues>>) {
+    let mut guard = match queues.lock() {
         Ok(guard) => guard,
         Err(_) => {
             output.fill(0.0);
@@ -294,12 +386,12 @@ fn write_samples_f32(output: &mut [f32], queue: &Arc<Mutex<VecDeque<f32>>>) {
     };
 
     for sample in output.iter_mut() {
-        *sample = guard.pop_front().unwrap_or(0.0);
+        *sample = pop_mixed_sample(&mut guard);
     }
 }
 
-fn write_samples_i16(output: &mut [i16], queue: &Arc<Mutex<VecDeque<f32>>>) {
-    let mut guard = match queue.lock() {
+fn write_samples_i16(output: &mut [i16], queues: &Arc<Mutex<MixQueues>>) {
+    let mut guard = match queues.lock() {
         Ok(guard) => guard,
         Err(_) => {
             output.fill(0);
@@ -308,13 +400,13 @@ fn write_samples_i16(output: &mut [i16], queue: &Arc<Mutex<VecDeque<f32>>>) {
     };
 
     for sample in output.iter_mut() {
-        let v = guard.pop_front().unwrap_or(0.0);
+        let v = pop_mixed_sample(&mut guard);
         *sample = (v.clamp(-1.0, 1.0) * 32767.0) as i16;
     }
 }
 
-fn write_samples_u16(output: &mut [u16], queue: &Arc<Mutex<VecDeque<f32>>>) {
-    let mut guard = match queue.lock() {
+fn write_samples_u16(output: &mut [u16], queues: &Arc<Mutex<MixQueues>>) {
+    let mut guard = match queues.lock() {
         Ok(guard) => guard,
         Err(_) => {
             output.fill(u16::MAX / 2);
@@ -323,7 +415,7 @@ fn write_samples_u16(output: &mut [u16], queue: &Arc<Mutex<VecDeque<f32>>>) {
     };
 
     for sample in output.iter_mut() {
-        let v = guard.pop_front().unwrap_or(0.0);
+        let v = pop_mixed_sample(&mut guard);
         *sample = ((v.clamp(-1.0, 1.0) * 0.5 + 0.5) * (u16::MAX as f32)) as u16;
     }
 }

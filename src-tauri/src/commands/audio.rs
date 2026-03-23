@@ -292,8 +292,52 @@ pub async fn inject_pcm_to_device(
     sample_rate: u32,
     state: State<'_, InjectPlayerState>,
 ) -> Result<(), String> {
-    let player = state.player.lock().map_err(|_| "lock error".to_string())?;
-    player.play_pcm(device_name, pcm_data, sample_rate)
+    // Backward-compatible path: treat generic inject as translated channel.
+    let mut guard = state.player.lock().map_err(|_| "lock error".to_string())?;
+    match guard.play_translated_pcm(device_name.clone(), pcm_data.clone(), sample_rate) {
+        Ok(()) => Ok(()),
+        Err(err) if err.contains("thread stopped") => {
+            *guard = InjectPlayer::new();
+            guard.play_translated_pcm(device_name, pcm_data, sample_rate)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[tauri::command]
+pub async fn inject_original_pcm_to_device(
+    device_name: String,
+    pcm_data: Vec<u8>,
+    sample_rate: u32,
+    state: State<'_, InjectPlayerState>,
+) -> Result<(), String> {
+    let mut guard = state.player.lock().map_err(|_| "lock error".to_string())?;
+    match guard.play_original_pcm(device_name.clone(), pcm_data.clone(), sample_rate) {
+        Ok(()) => Ok(()),
+        Err(err) if err.contains("thread stopped") => {
+            *guard = InjectPlayer::new();
+            guard.play_original_pcm(device_name, pcm_data, sample_rate)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[tauri::command]
+pub async fn inject_translated_pcm_to_device(
+    device_name: String,
+    pcm_data: Vec<u8>,
+    sample_rate: u32,
+    state: State<'_, InjectPlayerState>,
+) -> Result<(), String> {
+    let mut guard = state.player.lock().map_err(|_| "lock error".to_string())?;
+    match guard.play_translated_pcm(device_name.clone(), pcm_data.clone(), sample_rate) {
+        Ok(()) => Ok(()),
+        Err(err) if err.contains("thread stopped") => {
+            *guard = InjectPlayer::new();
+            guard.play_translated_pcm(device_name, pcm_data, sample_rate)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 #[tauri::command]

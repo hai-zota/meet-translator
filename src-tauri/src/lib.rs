@@ -2,11 +2,11 @@ mod audio;
 mod commands;
 mod settings;
 
+use audio::inject_player::{InjectPlayer, InjectPlayerState};
 use audio::microphone::MicCapture;
 use audio::mixer::SmartMixer;
-use audio::inject_player::{InjectPlayer, InjectPlayerState};
-use audio::{SystemAudioCapture, TARGET_SAMPLE_RATE};
 use audio::tts_player::{TtsPlayer, TtsPlayerState};
+use audio::{SystemAudioCapture, TARGET_SAMPLE_RATE};
 use commands::audio::AudioState;
 use commands::local_pipeline::LocalPipelineState;
 use commands::mixer::MixerState;
@@ -70,6 +70,8 @@ pub fn run() {
             commands::audio::list_output_devices,
             commands::audio::inject_audio_to_device,
             commands::audio::inject_pcm_to_device,
+            commands::audio::inject_original_pcm_to_device,
+            commands::audio::inject_translated_pcm_to_device,
             commands::audio::stop_inject_audio,
             commands::transcript::save_transcript,
             commands::transcript::open_transcript_dir,

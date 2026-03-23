@@ -72,6 +72,8 @@ class App {
         this._originalInjectQueue = [];
         this._translatedInjectQueue = [];
         this._isPumpRunning = false;
+        this._recentOriginalPcm = [];
+        this._recentOriginalMaxBytes = 32000; // ~1s at 16kHz mono s16le
         this._ttsTextQueue = [];      // Decoupled TTS text queue
         this._ttsQueuePumping = false; // Whether TTS pump loop is active
         this._ttsPumpToken = 0;       // Invalidate stale pump loops across mode switches
@@ -1790,13 +1792,28 @@ class App {
         return Array.from(new Uint8Array(samples.buffer));
     }
 
-    async _injectPcmBytesNow(pcmData, stream, volume = 1.0) {
+    async _injectPcmBytesNow(pcmData, stream, volume = 1.0, channel = 'translated') {
         const scaledPcm = this._scalePcm16Bytes(pcmData, volume);
-        await invoke('inject_pcm_to_device', {
-            deviceName: this.injectDeviceName,
-            pcmData: scaledPcm,
-            sampleRate: 16000,
-        });
+        if (!scaledPcm || scaledPcm.length < 2) return;
+        if (scaledPcm.length % 2 !== 0) {
+            scaledPcm.pop();
+            if (scaledPcm.length < 2) return;
+        }
+
+        // Send in fixed windows to avoid large IPC payload spikes on long translated chunks.
+        const INJECT_CHUNK_BYTES = 6400; // ~200ms @ 16kHz mono s16le
+        const command = channel === 'original'
+            ? 'inject_original_pcm_to_device'
+            : 'inject_translated_pcm_to_device';
+        for (let offset = 0; offset < scaledPcm.length; offset += INJECT_CHUNK_BYTES) {
+            const chunk = scaledPcm.slice(offset, offset + INJECT_CHUNK_BYTES);
+            if (chunk.length < 2) continue;
+            await invoke(command, {
+                deviceName: this.injectDeviceName,
+                pcmData: chunk,
+                sampleRate: 16000,
+            });
+        }
         this._injectFailureCount = 0;
         this._injectUsedLegacyFallback = false;
     }
@@ -1817,6 +1834,51 @@ class App {
         return Array.from(new Uint8Array(out.buffer));
     }
 
+    // Consume up to targetBytes from original inject queue and keep leftover bytes for next cycle.
+    _dequeueOriginalBytes(targetBytes) {
+        const out = [];
+        let remaining = Math.max(0, targetBytes || 0);
+
+        while (remaining > 0 && this._originalInjectQueue.length > 0) {
+            const head = this._originalInjectQueue[0];
+            const headBytes = head?.pcmData || [];
+            if (!headBytes.length) {
+                this._originalInjectQueue.shift();
+                continue;
+            }
+
+            if (headBytes.length <= remaining) {
+                Array.prototype.push.apply(out, headBytes);
+                remaining -= headBytes.length;
+                this._originalInjectQueue.shift();
+            } else {
+                Array.prototype.push.apply(out, headBytes.slice(0, remaining));
+                head.pcmData = headBytes.slice(remaining);
+                remaining = 0;
+            }
+        }
+
+        return out;
+    }
+
+    _appendRecentOriginalPcm(pcmData) {
+        const bytes = Array.isArray(pcmData) ? pcmData : Array.from(new Uint8Array(pcmData));
+        if (!bytes.length) return;
+
+        Array.prototype.push.apply(this._recentOriginalPcm, bytes);
+        const overflow = this._recentOriginalPcm.length - this._recentOriginalMaxBytes;
+        if (overflow > 0) {
+            this._recentOriginalPcm.splice(0, overflow);
+        }
+    }
+
+    _getRecentOriginalWindow(targetBytes) {
+        const n = Math.max(0, targetBytes || 0);
+        if (n === 0 || this._recentOriginalPcm.length === 0) return [];
+        if (this._recentOriginalPcm.length <= n) return this._recentOriginalPcm.slice();
+        return this._recentOriginalPcm.slice(this._recentOriginalPcm.length - n);
+    }
+
     _enqueuePcmInject(pcmData, stream, volume = 1.0, priority = 'translated') {
         const item = {
             pcmData: Array.isArray(pcmData) ? pcmData : Array.from(new Uint8Array(pcmData)),
@@ -1825,8 +1887,9 @@ class App {
         };
         if (priority === 'original') {
             this._originalInjectQueue.push(item);
-            if (this._originalInjectQueue.length > 8) {
-                this._originalInjectQueue.splice(0, this._originalInjectQueue.length - 8);
+            // Keep a bit more headroom for continuous mic stream bursts.
+            if (this._originalInjectQueue.length > 24) {
+                this._originalInjectQueue.splice(0, this._originalInjectQueue.length - 24);
             }
         } else {
             this._translatedInjectQueue.push(item);
@@ -1842,52 +1905,34 @@ class App {
         this._isPumpRunning = true;
 
         try {
+            const ORIGINAL_ONLY_WINDOW_BYTES = 6400; // ~200ms at 16kHz mono s16le
+
             while (this.isRunning) {
+                let didWork = false;
+
+                // 1) Always push original channel continuously when available.
+                if (this._originalInjectQueue.length > 0) {
+                    const origBytes = this._dequeueOriginalBytes(ORIGINAL_ONLY_WINDOW_BYTES);
+                    if (origBytes.length > 0) {
+                        const stream = this._originalInjectQueue[0]?.stream || 'B';
+                        const volume = this._clampVolume(this.dualConfig.streamB.originalVolume, 1.0);
+                        await this._injectPcmBytesNow(origBytes, stream, volume, 'original');
+                        didWork = true;
+                    }
+                }
+
+                // 2) Push one translated segment independently; Rust mixer handles ducking/mix.
                 if (this._translatedInjectQueue.length > 0) {
                     const item = this._translatedInjectQueue.shift();
-                    let pcmToPlay = item.pcmData;
+                    const translatedVolume = this._clampVolume(item.volume, 1.0);
+                    const translatedScaled = Math.abs(translatedVolume - 1.0) < 0.0001
+                        ? item.pcmData
+                        : this._scalePcm16Bytes(item.pcmData, translatedVolume);
+                    await this._injectPcmBytesNow(translatedScaled, item.stream, 1.0, 'translated');
+                    didWork = true;
+                }
 
-                    // Mix in all pending original using each chunk's own configured volume.
-                    if (this._originalInjectQueue.length > 0) {
-                        const origBytes = [];
-                        let origVolume = 1.0;
-                        while (this._originalInjectQueue.length > 0) {
-                            const orig = this._originalInjectQueue.shift();
-                            origVolume = orig.volume;
-                            Array.prototype.push.apply(origBytes, orig.pcmData);
-                        }
-                        const mixerCfgPump = settingsManager.get().mixer || {};
-                        if (mixerCfgPump.enabled !== false) {
-                            try {
-                                const result = await invoke('mixer_process_chunk', {
-                                    originalPcmBytes: origBytes,
-                                    translatedPcmBytes: item.pcmData,
-                                });
-                                pcmToPlay = result.mixed_pcm;
-                            } catch (_e) {
-                                pcmToPlay = this._mixPcm16Bytes(pcmToPlay, origBytes, origVolume);
-                            }
-                        } else {
-                            pcmToPlay = this._mixPcm16Bytes(pcmToPlay, origBytes, origVolume);
-                        }
-                    }
-
-                    await this._injectPcmBytesNow(pcmToPlay, item.stream, item.volume);
-
-                } else if (this._originalInjectQueue.length > 0) {
-                    // No translated: batch all pending original into one call.
-                    const origBytes = [];
-                    let stream = 'B';
-                    let volume = 1.0;
-                    while (this._originalInjectQueue.length > 0) {
-                        const orig = this._originalInjectQueue.shift();
-                        Array.prototype.push.apply(origBytes, orig.pcmData);
-                        stream = orig.stream;
-                        volume = orig.volume;
-                    }
-                    await this._injectPcmBytesNow(origBytes, stream, volume);
-
-                } else {
+                if (!didWork) {
                     break;
                 }
             }
@@ -1898,10 +1943,7 @@ class App {
                 this._lastInjectErrorTs = now;
                 this._showToast(`Inject failed: ${err}`, 'error');
             }
-            if (this._injectFailureCount >= 3 && this.dualConfig?.streamB?.injectEnabled) {
-                this.dualConfig.streamB.injectEnabled = false;
-                this._showToast('Audio injection auto-disabled after repeated failures', 'info');
-            }
+            // Keep inject enabled; transient errors should not permanently silence output.
         } finally {
             this._isPumpRunning = false;
             if (this.isRunning && (this._translatedInjectQueue.length > 0 || this._originalInjectQueue.length > 0)) {
@@ -1940,11 +1982,7 @@ class App {
                 this._showToast(`Stream ${stream} inject failed: ${err}`, 'error');
             }
 
-            // Hardening: disable injection after repeated failures to keep translation running.
-            if (this._injectFailureCount >= 3 && this.dualConfig.streamB.injectEnabled) {
-                this.dualConfig.streamB.injectEnabled = false;
-                this._showToast('Audio injection auto-disabled after repeated failures', 'info');
-            }
+            // Keep inject enabled; transient decode/device errors should not disable Stream B routing.
         }
     }
 
@@ -2599,6 +2637,7 @@ class App {
         this._originalInjectQueue = [];
         this._translatedInjectQueue = [];
         this._isPumpRunning = false;
+        this._recentOriginalPcm = [];
         this._resetTtsQueueState({ clearQueue: true });
 
         audioPlayer.stop();
@@ -2829,9 +2868,10 @@ class App {
             this._isRunActive(runId) && this.transcriptUI.addOriginalForStream('B', text, speaker);
         this.sonioxClientB.onTranslation = (text) => {
             if (!this._isRunActive(runId)) return;
+            const liveCfgB = this.dualConfig.streamB;
             this.transcriptUI.addTranslationForStream('B', text);
-            console.log('[DualB] translation received, tts=', cfgB.ttsEnabled, 'inject=', cfgB.injectEnabled);
-            if (cfgB.ttsEnabled && text?.trim()) {
+            console.log('[DualB] translation received, tts=', liveCfgB.ttsEnabled, 'inject=', liveCfgB.injectEnabled);
+            if (liveCfgB.ttsEnabled && text?.trim()) {
                 this._speakWithRouting(text, {
                     stream: 'B',
                     inject: false,
@@ -2839,7 +2879,7 @@ class App {
                 });
             }
 
-            if (cfgB.injectEnabled && text?.trim()) {
+            if (liveCfgB.injectEnabled && text?.trim()) {
                 this._enqueueInjectText(text);
             }
         };
@@ -2881,17 +2921,19 @@ class App {
 
         channelB.onmessage = (pcmData) => {
             if (!this._isRunActive(runId)) return;
+            const liveCfgB = this.dualConfig.streamB;
             audioCountB++;
             if (audioCountB <= 3 || audioCountB % 50 === 0)
                 console.log(`[DualB] Batch #${audioCountB}, size:`, pcmData?.length || 0);
             const bytes = new Uint8Array(pcmData);
             this.sonioxClientB.sendAudio(bytes.buffer);
+            this._appendRecentOriginalPcm(bytes);
 
-            if (cfgB.injectEnabled && cfgB.mixOriginalEnabled) {
+            if (liveCfgB.injectEnabled && liveCfgB.mixOriginalEnabled) {
                 this._enqueuePcmInject(
                     bytes,
                     'B',
-                    this._clampVolume(cfgB.originalVolume, 1.0),
+                    this._clampVolume(liveCfgB.originalVolume, 1.0),
                     'original'
                 );
             }

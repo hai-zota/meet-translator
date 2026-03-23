@@ -46,7 +46,11 @@ impl SmartMixer {
     }
 
     /// Update ducking parameters
-    pub fn update_settings(&mut self, ducking_level: f32, vad_sensitivity: &str) -> Result<(), String> {
+    pub fn update_settings(
+        &mut self,
+        ducking_level: f32,
+        vad_sensitivity: &str,
+    ) -> Result<(), String> {
         self.vad = VadProcessor::new(vad_sensitivity, None)?;
         self.ducking.configure(ducking_level, -40.0);
         Ok(())
@@ -62,13 +66,55 @@ impl SmartMixer {
         original_pcm: &[i16],
         translated_pcm: &[i16],
     ) -> Result<(Vec<i16>, MixerStats), String> {
-        if !self.enabled || original_pcm.is_empty() || translated_pcm.is_empty() {
-            return Ok((vec![], MixerStats {
-                original_lufs: None,
-                translated_lufs: None,
-                ducking_gain: 1.0,
-                is_speech: false,
-            }));
+        if !self.enabled {
+            return Ok((
+                vec![],
+                MixerStats {
+                    original_lufs: None,
+                    translated_lufs: None,
+                    ducking_gain: 1.0,
+                    is_speech: false,
+                },
+            ));
+        }
+
+        if original_pcm.is_empty() && translated_pcm.is_empty() {
+            return Ok((
+                vec![],
+                MixerStats {
+                    original_lufs: None,
+                    translated_lufs: None,
+                    ducking_gain: 1.0,
+                    is_speech: false,
+                },
+            ));
+        }
+
+        if translated_pcm.is_empty() {
+            return Ok((
+                original_pcm.to_vec(),
+                MixerStats {
+                    original_lufs: self.original_analyzer.push_samples(original_pcm),
+                    translated_lufs: None,
+                    ducking_gain: 1.0,
+                    is_speech: self
+                        .vad
+                        .process_frame(&self._to_f32(original_pcm))
+                        .unwrap_or(false),
+                },
+            ));
+        }
+
+        if original_pcm.is_empty() {
+            return Ok((
+                translated_pcm.to_vec(),
+                MixerStats {
+                    original_lufs: None,
+                    translated_lufs: self.translated_analyzer.push_samples(translated_pcm),
+                    ducking_gain: 1.0,
+                    is_speech: false,
+                },
+            ));
         }
 
         // Analyze loudness
@@ -76,7 +122,10 @@ impl SmartMixer {
         let translated_lufs = self.translated_analyzer.push_samples(translated_pcm);
 
         // Detect voice
-        let is_speech = self.vad.process_frame(&self._to_f32(original_pcm)).unwrap_or(false);
+        let is_speech = self
+            .vad
+            .process_frame(&self._to_f32(original_pcm))
+            .unwrap_or(false);
 
         // Calculate ducking gain
         let orig_lufs = original_lufs.unwrap_or(-100.0);
@@ -84,10 +133,12 @@ impl SmartMixer {
         let translated_active = trans_lufs > -40.0;
 
         let ducking_gain = self.ducking.process(orig_lufs, translated_active, 16);
+        // Voice-over behavior: keep original bed audible even during strong translated speech.
+        let ducking_gain = ducking_gain.max(0.30);
 
         // Apply gain to original and mix
         let attenuated = self._apply_gain_s16(original_pcm, ducking_gain);
-        let mixed = self._mix_streams(&attenuated, translated_pcm);
+        let mixed = self._mix_streams_soft_limited(&attenuated, translated_pcm);
 
         let stats = MixerStats {
             original_lufs,
@@ -100,10 +151,7 @@ impl SmartMixer {
     }
 
     fn _to_f32(&self, pcm_s16: &[i16]) -> Vec<f32> {
-        pcm_s16
-            .iter()
-            .map(|&s| s as f32 / 32768.0)
-            .collect()
+        pcm_s16.iter().map(|&s| s as f32 / 32768.0).collect()
     }
 
     fn _apply_gain_s16(&self, pcm: &[i16], gain: f32) -> Vec<i16> {
@@ -119,15 +167,20 @@ impl SmartMixer {
         }
     }
 
-    fn _mix_streams(&self, stream_a: &[i16], stream_b: &[i16]) -> Vec<i16> {
+    fn _mix_streams_soft_limited(&self, stream_a: &[i16], stream_b: &[i16]) -> Vec<i16> {
         let len = stream_a.len().max(stream_b.len());
         let mut mixed = vec![0i16; len];
 
         for i in 0..len {
-            let a = stream_a.get(i).copied().unwrap_or(0) as i32;
-            let b = stream_b.get(i).copied().unwrap_or(0) as i32;
-            let sum = a + b;
-            mixed[i] = sum.clamp(-32768, 32767) as i16;
+            let a = stream_a.get(i).copied().unwrap_or(0) as f32 / 32768.0;
+            let b = stream_b.get(i).copied().unwrap_or(0) as f32 / 32768.0;
+
+            // Keep translated as foreground while preserving original as background.
+            let linear_mix = (a * 0.85) + (b * 1.0);
+
+            // Soft clip reduces harsh distortion compared to hard clipping.
+            let limited = linear_mix.tanh().clamp(-1.0, 1.0);
+            mixed[i] = (limited * 32767.0) as i16;
         }
 
         mixed
@@ -138,7 +191,12 @@ impl SmartMixer {
 mod tests {
     use super::*;
 
-    fn make_pcm_sine(freq_hz: f32, amplitude: f32, num_samples: usize, sample_rate: u32) -> Vec<i16> {
+    fn make_pcm_sine(
+        freq_hz: f32,
+        amplitude: f32,
+        num_samples: usize,
+        sample_rate: u32,
+    ) -> Vec<i16> {
         (0..num_samples)
             .map(|i| {
                 let t = i as f32 / sample_rate as f32;
@@ -196,8 +254,14 @@ mod tests {
 
         let (mixed, stats) = mixer.process_chunk(&orig, &trans).unwrap();
 
-        assert!(mixed.is_empty(), "Disabled mixer should return empty output");
-        assert_eq!(stats.ducking_gain, 1.0, "Disabled mixer should have unity gain");
+        assert!(
+            mixed.is_empty(),
+            "Disabled mixer should return empty output"
+        );
+        assert_eq!(
+            stats.ducking_gain, 1.0,
+            "Disabled mixer should have unity gain"
+        );
     }
 
     // ============ MIXING CORRECTNESS TESTS ============
@@ -242,7 +306,11 @@ mod tests {
         let (mixed, _) = mixer.process_chunk(&orig, &trans).unwrap();
 
         for &s in &mixed {
-            assert!(s <= i16::MAX && s >= i16::MIN, "Sample {} out of i16 range", s);
+            assert!(
+                s <= i16::MAX && s >= i16::MIN,
+                "Sample {} out of i16 range",
+                s
+            );
         }
     }
 
@@ -270,7 +338,10 @@ mod tests {
 
         let min_gain = stats_list.iter().cloned().fold(1.0f32, f32::min);
         println!("Minimum ducking gain: {}", min_gain);
-        assert!(min_gain < 0.95, "Ducking should reduce original gain below 0.95");
+        assert!(
+            min_gain < 0.95,
+            "Ducking should reduce original gain below 0.95"
+        );
     }
 
     #[test]
@@ -282,7 +353,10 @@ mod tests {
         let silence = make_silence(n);
 
         let (_, stats) = mixer.process_chunk(&orig, &silence).unwrap();
-        assert_eq!(stats.ducking_gain, 1.0, "No ducking when translated is silent");
+        assert_eq!(
+            stats.ducking_gain, 1.0,
+            "No ducking when translated is silent"
+        );
     }
 
     // ============ STATS TESTS ============
@@ -303,7 +377,10 @@ mod tests {
         );
 
         // For 100ms window, LUFS values should be populated
-        assert!(stats.original_lufs.is_some(), "original_lufs should be Some after 100ms window");
+        assert!(
+            stats.original_lufs.is_some(),
+            "original_lufs should be Some after 100ms window"
+        );
     }
 
     #[test]
@@ -356,8 +433,14 @@ mod tests {
         }
 
         let stats = last_stats.expect("stats should exist after processing");
-        assert!(stats.original_lufs.is_some(), "16kHz path should populate original LUFS after 100ms");
-        assert!(stats.translated_lufs.is_some(), "16kHz path should populate translated LUFS after 100ms");
+        assert!(
+            stats.original_lufs.is_some(),
+            "16kHz path should populate original LUFS after 100ms"
+        );
+        assert!(
+            stats.translated_lufs.is_some(),
+            "16kHz path should populate translated LUFS after 100ms"
+        );
     }
 
     #[test]
@@ -380,7 +463,11 @@ mod tests {
             min_gain = min_gain.min(stats.ducking_gain);
         }
 
-        assert!(min_gain < 0.95, "16kHz runtime path should activate ducking, min_gain={}", min_gain);
+        assert!(
+            min_gain < 0.95,
+            "16kHz runtime path should activate ducking, min_gain={}",
+            min_gain
+        );
     }
 
     // ============ PERFORMANCE TESTS ============
@@ -436,7 +523,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         let per_chunk_ms = elapsed.as_secs_f32() * 1000.0 / 200.0;
-        println!("SmartMixer per-chunk: {:.3}ms (10ms @ 16kHz runtime path)", per_chunk_ms);
+        println!(
+            "SmartMixer per-chunk: {:.3}ms (10ms @ 16kHz runtime path)",
+            per_chunk_ms
+        );
 
         assert!(
             per_chunk_ms < 2.0,
