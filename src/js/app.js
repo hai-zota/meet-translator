@@ -387,8 +387,17 @@ class App {
 
         // TTS provider toggle — show/hide relevant settings panels
         document.getElementById('select-tts-provider')?.addEventListener('change', (e) => {
-            this._updateTTSProviderUI(e.target.value);
-            this._syncTranslationVoiceOptions(settingsManager.get());
+            const nextProvider = e.target.value;
+            this._updateTTSProviderUI(nextProvider);
+
+            // Apply provider-sensitive filtering with the live selection immediately,
+            // not the last persisted settings value.
+            const nextSettings = {
+                ...settingsManager.get(),
+                tts_provider: nextProvider,
+            };
+            this._syncTranslationVoiceOptions(nextSettings);
+            this._syncQuickLocaleControls(nextSettings);
         });
 
         // Translation target language changes should auto-select/filter voices.
