@@ -83,6 +83,7 @@ class App {
         this._dualStreamErrorHistory = { A: [], B: [] };
         this._lastStreamErrorToastTs = { A: 0, B: 0 };
         this._lastSonioxTransientToastTs = 0;
+        this._streamBInjectBypassUntil = 0;
     }
 
     async init() {
@@ -519,6 +520,10 @@ class App {
             } else {
                 this.transcriptUI.clearProvisional();
             }
+        };
+        sonioxClient.onNoTranslation = (text) => {
+            if (!text?.trim()) return;
+            this.transcriptUI.addNoTranslation(text);
         };
 
         sonioxClient.onStatusChange = (status) => {
@@ -2984,6 +2989,10 @@ class App {
             if (!this._isRunActive(runId)) return;
             this.transcriptUI.clearPendingAfterReconnect('A');
         };
+        this.sonioxClientA.onNoTranslation = (text) => {
+            if (!this._isRunActive(runId) || !text?.trim()) return;
+            this.transcriptUI.addNoTranslationForStream('A', text);
+        };
 
         // Wire Stream B callbacks
         this.sonioxClientB.onOriginal = (text, speaker) =>
@@ -3012,6 +3021,16 @@ class App {
         this.sonioxClientB.onRecovered = () => {
             if (!this._isRunActive(runId)) return;
             this.transcriptUI.clearPendingAfterReconnect('B');
+        };
+        this.sonioxClientB.onNoTranslation = (text) => {
+            if (!this._isRunActive(runId) || !text?.trim()) return;
+            this.transcriptUI.addNoTranslationForStream('B', text);
+
+            const liveCfgB = this.dualConfig.streamB;
+            if (liveCfgB.injectEnabled) {
+                // Temporarily bypass translated TTS inject and pass through original PCM instead.
+                this._streamBInjectBypassUntil = Date.now() + 2500;
+            }
         };
 
         // Connect both Soniox sessions
@@ -3055,7 +3074,8 @@ class App {
             this.sonioxClientB.sendAudio(bytes.buffer);
             this._appendRecentOriginalPcm(bytes);
 
-            if (liveCfgB.injectEnabled && liveCfgB.mixOriginalEnabled) {
+            const shouldBypassInject = Date.now() < this._streamBInjectBypassUntil;
+            if (liveCfgB.injectEnabled && (liveCfgB.mixOriginalEnabled || shouldBypassInject)) {
                 this._enqueuePcmInject(
                     bytes,
                     'B',

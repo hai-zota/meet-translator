@@ -37,10 +37,13 @@ export class SonioxClient {
         this._reconnectTimer = null;
         this._isReconnectScheduled = false;
         this._lastTransientNotifyTs = 0;
+        this._lastNoTranslationSig = '';
+        this._lastNoTranslationTs = 0;
 
         // Callbacks
         this.onOriginal = null;       // (text, speaker) => {}
         this.onTranslation = null;    // (text) => {}
+        this.onNoTranslation = null;  // (originalText) => {}
         this.onProvisional = null;    // (text, speaker) => {}
         this.onStatusChange = null;   // (status) => {}
         this.onError = null;          // (error) => {}
@@ -58,6 +61,8 @@ export class SonioxClient {
         this._reconnectAttempts = 0;
         this._recentTranslations = [];
         this._clearReconnectTimer();
+        this._lastNoTranslationSig = '';
+        this._lastNoTranslationTs = 0;
 
         if (!apiKey) {
             this._setStatus('error');
@@ -272,7 +277,7 @@ export class SonioxClient {
                 continue;
             }
 
-            if (token.speaker && token.translation_status === 'original') {
+            if (token.speaker && (token.translation_status === 'original' || token.translation_status === 'none')) {
                 speaker = token.speaker;
             }
 
@@ -286,18 +291,37 @@ export class SonioxClient {
                 if (token.is_final) {
                     translationText += token.text;
                 }
+            } else if (token.translation_status === 'none') {
+                // Soniox may emit non-translated finalized text as status=none.
+                if (token.is_final) {
+                    originalText += token.text;
+                } else {
+                    provisionalText += token.text;
+                }
             }
         }
 
-        // Emit finalized original text with speaker
-        if (originalText.trim()) {
-            this.onOriginal?.(originalText, speaker);
-        }
-
-        // Emit translation + store for context carryover
+        // Emit translation first if available + store for context carryover
         if (translationText.trim()) {
+            // For translation case: emit original as placeholder, then apply translation
+            if (originalText.trim()) {
+                this.onOriginal?.(originalText, speaker);
+            }
             this.onTranslation?.(translationText);
             this._addToHistory(translationText);
+        } else if (originalText.trim() && (hasEnd || !provisionalText.trim())) {
+            // No translation: emit original directly
+            this.onOriginal?.(originalText, speaker);
+            
+            // Also emit no-translation marker for same-language scenario
+            // Use a short dedupe window to avoid duplicate emissions across adjacent frames.
+            const now = Date.now();
+            const sig = `${speaker || ''}|${originalText.trim()}`;
+            if (sig !== this._lastNoTranslationSig || now - this._lastNoTranslationTs > 800) {
+                this._lastNoTranslationSig = sig;
+                this._lastNoTranslationTs = now;
+                this.onNoTranslation?.(originalText);
+            }
         }
 
         // Emit provisional text with speaker
