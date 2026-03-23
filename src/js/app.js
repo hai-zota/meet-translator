@@ -78,6 +78,12 @@ class App {
         this._ttsQueuePumping = false; // Whether TTS pump loop is active
         this._ttsPumpToken = 0;       // Invalidate stale pump loops across mode switches
         this._ttsPumpHeartbeat = 0;   // Last observed pump activity timestamp
+        this._ttsInFlight = 0;        // Number of active TTS API requests
+        this._ttsMaxConcurrent = 3;   // Concurrent synthesis requests
+        this._ttsSeqCounter = 1;      // Monotonic sequence id per transcript chunk
+        this._ttsNextFlushSeq = 1;    // Next sequence id that can be routed to playback
+        this._ttsReadyMap = new Map(); // seq -> { base64Audio, options }
+        this._ttsFlushRunning = false; // Guard ordered flush from concurrent re-entry
         this._runId = 0; // Incremented on each start/stop to invalidate stale callbacks
         this._dualStreamStates = { A: 'idle', B: 'idle' };
         this._dualStreamErrorHistory = { A: [], B: [] };
@@ -1790,7 +1796,7 @@ class App {
      * The independent pump loop will process it later.
      */
     _enqueueTtsText(text, options) {
-        this._ttsTextQueue.push({ text, options });
+        this._ttsTextQueue.push({ seq: this._ttsSeqCounter++, text, options });
         // Cap queue to prevent unbounded growth
         if (this._ttsTextQueue.length > 30) {
             this._ttsTextQueue.splice(0, this._ttsTextQueue.length - 20);
@@ -1825,38 +1831,88 @@ class App {
      * Async pump: processes TTS queue items one by one.
      * Runs independently of audio capture and Soniox callbacks.
      */
-    async _runTtsPump(token) {
+    _runTtsPump(token) {
         if (token !== this._ttsPumpToken) return;
 
         try {
-            while (this._ttsTextQueue.length > 0 && this.isRunning) {
+            while (
+                this.isRunning &&
+                this._ttsTextQueue.length > 0 &&
+                this._ttsInFlight < this._ttsMaxConcurrent
+            ) {
                 if (token !== this._ttsPumpToken) break;
-                const { text, options } = this._ttsTextQueue.shift();
-                if (!this.ttsEnabled && !(options?.bypassGlobalToggle)) continue;
+                const item = this._ttsTextQueue.shift();
+                if (!item) break;
+                if (!this.ttsEnabled && !(item.options?.bypassGlobalToggle)) continue;
 
                 this._ttsPumpHeartbeat = Date.now();
-
-                const tts = this._getActiveTTS();
-                const settings = settingsManager.get();
-                const stream = options?.stream;
-                this._configureTTS(tts, settings, (stream === 'A' || stream === 'B') ? stream : null);
-
-                if (!tts.isConnected) {
-                    tts.connect?.();
-                }
-
-                tts.speak(text, options);
-
-                // Yield to event loop between items so audio callbacks are never starved
-                await new Promise(r => setTimeout(r, 0));
+                this._ttsInFlight += 1;
+                this._synthesizeAndQueueTts(item, token)
+                    .catch((err) => {
+                        console.error('[TTS] Synthesis failed:', err);
+                    })
+                    .finally(() => {
+                        if (token !== this._ttsPumpToken) return;
+                        this._ttsInFlight = Math.max(0, this._ttsInFlight - 1);
+                        this._ttsPumpHeartbeat = Date.now();
+                        this._scheduleTtsPump();
+                    });
             }
         } finally {
             if (token !== this._ttsPumpToken) return;
             this._ttsQueuePumping = false;
-            this._ttsPumpHeartbeat = 0;
-            // If new items arrived while we were processing, restart
-            if (this._ttsTextQueue.length > 0 && this.isRunning) {
+
+            // Keep heartbeat while requests are still in flight.
+            if (this._ttsInFlight === 0) {
+                this._ttsPumpHeartbeat = 0;
+            }
+
+            // If new items arrived while dispatching or workers still running, keep pumping.
+            if ((this._ttsTextQueue.length > 0 || this._ttsInFlight > 0) && this.isRunning) {
                 this._scheduleTtsPump();
+            }
+        }
+    }
+
+    async _synthesizeAndQueueTts(item, token) {
+        const { seq, text, options } = item;
+        if (!text?.trim() || token !== this._ttsPumpToken || !this.isRunning) return;
+
+        const stream = options?.stream;
+        const synthStream = (stream === 'A' || stream === 'B') ? stream : 'single';
+
+        const base64Audio = await this._ttsGetBase64(text, synthStream);
+        if (!base64Audio || token !== this._ttsPumpToken || !this.isRunning) return;
+
+        this._ttsReadyMap.set(seq, { base64Audio, options });
+        await this._flushReadyTtsAudio(token);
+    }
+
+    async _flushReadyTtsAudio(token) {
+        if (this._ttsFlushRunning) return;
+        this._ttsFlushRunning = true;
+
+        try {
+        while (this._ttsReadyMap.has(this._ttsNextFlushSeq)) {
+            if (token !== this._ttsPumpToken || !this.isRunning) return;
+
+            const ready = this._ttsReadyMap.get(this._ttsNextFlushSeq);
+            this._ttsReadyMap.delete(this._ttsNextFlushSeq);
+            this._ttsNextFlushSeq += 1;
+
+            if (!ready?.base64Audio) continue;
+            const options = ready.options || {};
+            await this._handleTtsAudioChunk(ready.base64Audio, options);
+        }
+        } finally {
+            this._ttsFlushRunning = false;
+            if (
+                token === this._ttsPumpToken &&
+                this.isRunning &&
+                this._ttsReadyMap.has(this._ttsNextFlushSeq)
+            ) {
+                // New contiguous item may have arrived while awaiting playback enqueue.
+                this._flushReadyTtsAudio(token);
             }
         }
     }
@@ -1865,9 +1921,14 @@ class App {
         this._ttsPumpToken += 1;
         this._ttsQueuePumping = false;
         this._ttsPumpHeartbeat = 0;
+        this._ttsInFlight = 0;
         if (clearQueue) {
             this._ttsTextQueue = [];
         }
+        this._ttsReadyMap.clear();
+        this._ttsSeqCounter = 1;
+        this._ttsNextFlushSeq = 1;
+        this._ttsFlushRunning = false;
     }
 
     async _handleTtsAudioChunk(base64Audio, meta) {
