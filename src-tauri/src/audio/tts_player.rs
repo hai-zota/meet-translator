@@ -2,7 +2,6 @@
 ///
 /// All decoding and playback runs completely outside the JS main thread,
 /// so audio-capture forwarding and Soniox communication are never blocked.
-
 use base64::Engine as _;
 use rodio::{Decoder, OutputStream, Sink};
 use std::io::Cursor;
