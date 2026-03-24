@@ -3,7 +3,8 @@ use serde::Serialize;
 
 const BLACKHOLE_2CH_NAME: &str = "BlackHole 2ch";
 #[cfg(target_os = "macos")]
-const BLACKHOLE_DOWNLOAD_PAGE_URL: &str = "https://github.com/ExistentialAudio/BlackHole/releases/latest";
+const BLACKHOLE_DOWNLOAD_PAGE_URL: &str =
+    "https://github.com/ExistentialAudio/BlackHole/releases/latest";
 #[cfg(target_os = "macos")]
 const BLACKHOLE_BREW_CASK: &str = "blackhole-2ch";
 
@@ -29,7 +30,8 @@ pub fn get_blackhole_setup_status() -> Result<BlackHoleSetupStatus, String> {
             "BlackHole is installed via Homebrew, but the audio device is not visible yet. Restart audio apps (or reboot), then click Recheck BlackHole."
                 .to_string()
         } else {
-            "BlackHole 2ch is not installed yet. Run one-click setup to download and install it.".to_string()
+            "BlackHole 2ch is not installed yet. Run one-click setup to download and install it."
+                .to_string()
         };
 
         return Ok(BlackHoleSetupStatus {
@@ -140,7 +142,10 @@ fn install_blackhole_with_brew() -> Result<(), String> {
     // After a successful install, automatically restart coreaudiod so the new
     // HAL driver is loaded without requiring a reboot.
     let done_msg = "\\u2705 BlackHole installed and audio restarted! Close this window and click Recheck BlackHole in the app.";
-    let fail_msg = format!("\\u274C Install failed. Try again or visit {}", BLACKHOLE_DOWNLOAD_PAGE_URL);
+    let fail_msg = format!(
+        "\\u274C Install failed. Try again or visit {}",
+        BLACKHOLE_DOWNLOAD_PAGE_URL
+    );
     let cmd = format!(
         "{} install --cask {} && sudo killall coreaudiod && echo '{}' || echo '{}'",
         brew_path, BLACKHOLE_BREW_CASK, done_msg, fail_msg

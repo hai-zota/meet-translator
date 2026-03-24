@@ -3,7 +3,7 @@ pub mod elevenlabs;
 pub mod edge_tts;
 pub mod local_pipeline;
 pub mod mixer;
-pub mod setup;
 pub mod settings;
+pub mod setup;
 pub mod transcript;
 pub mod tts_player;
