@@ -34,13 +34,15 @@ rand = "0.8"
 # Audio Mixer & Analysis
 ebur128 = "0.1"  # LUFS loudness measurement (EBU R128 standard)
 ringbuf = "0.3"  # Threadsafe circular buffer for audio
-ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }  # ONNX Runtime for VAD
 
 # macOS: ScreenCaptureKit for system audio + CoreAudio for AEC mic
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "2", features = ["macos-private-api"] }
 screencapturekit = "1.5"
 coreaudio-sys = { version = "0.2", features = ["audio_unit", "audio_toolbox"] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }  # ONNX Runtime for VAD
 
 # Windows: WASAPI for system audio
 [target.'cfg(target_os = "windows")'.dependencies]
