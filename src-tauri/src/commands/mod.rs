@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod elevenlabs;
 pub mod edge_tts;
 pub mod local_pipeline;
 pub mod mixer;

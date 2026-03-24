@@ -217,6 +217,7 @@
       <div class="settings-tabs">
         <button class="settings-tab active" data-tab="tab-translation,tab-tts">AI Model</button>
         <button class="settings-tab" data-tab="tab-dual">Translation</button>
+        <button class="settings-tab" data-tab="tab-elevenlabs-clone">Voice Clone</button>
         <button class="settings-tab" data-tab="tab-display">Display</button>
         <button class="settings-tab" data-tab="tab-mixer">Mixer</button>
       </div>
@@ -587,6 +588,58 @@
                 </select>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: ElevenLabs Voice Clone -->
+      <div class="settings-tab-content" id="tab-elevenlabs-clone">
+        <div class="settings-section">
+          <span class="field-label">ElevenLabs Voice Clone</span>
+          <p class="hint">Thu ~1 phút giọng nói để tạo voice mới. TTS vẫn dùng model <b>eleven_flash_v2_5</b>.</p>
+          <p class="hint">Yêu cầu API key ElevenLabs trong tab AI Model.</p>
+        </div>
+
+        <div class="settings-section">
+          <span class="field-label">Voice Name</span>
+          <input type="text" id="input-clone-voice-name" placeholder="Ví dụ: My Voice - 2026" />
+
+          <div class="field-row" style="margin-top:10px; gap:10px;">
+            <button id="btn-clone-record-start" class="primary-btn" style="padding:8px 12px;">
+              Start Recording
+            </button>
+            <button id="btn-clone-record-stop" class="icon-btn" style="padding:8px 12px;" disabled>
+              Stop
+            </button>
+            <span id="clone-record-timer" class="hint" style="margin:0; min-width:72px; text-align:right;">00:00</span>
+          </div>
+
+          <audio id="clone-audio-preview" controls style="width:100%; margin-top:10px; display:none;"></audio>
+          <p id="clone-status" class="hint" style="margin-top:8px;">Chưa có bản ghi.</p>
+
+          <button id="btn-create-cloned-voice" class="primary-btn" style="margin-top:10px;" disabled>
+            Create Voice ID
+          </button>
+        </div>
+
+        <div class="settings-section">
+          <span class="field-label">My ElevenLabs Voices</span>
+          <div class="field-row" style="gap:10px; align-items:center;">
+            <select id="select-cloned-voice-id" style="flex:1;"></select>
+            <button id="btn-refresh-elevenlabs-voices" class="icon-btn" style="padding:8px 12px;">Refresh</button>
+          </div>
+          <p class="hint" style="margin-top:8px;">Chọn voice để áp dụng cho TTS ElevenLabs.</p>
+          <button id="btn-apply-cloned-voice" class="primary-btn" style="margin-top:8px;">
+            Use Selected Voice for TTS
+          </button>
+        </div>
+
+        <div class="settings-section">
+          <span class="field-label">Test Sample Text</span>
+          <textarea id="input-clone-sample-text" rows="3" placeholder="Nhập câu muốn nghe thử với voice đã chọn...">Xin chào, đây là giọng nói vừa được clone để kiểm tra chất lượng.</textarea>
+          <div class="field-row" style="margin-top:8px; gap:10px; align-items:center;">
+            <button id="btn-test-cloned-voice" class="primary-btn" style="padding:8px 12px;">Test Voice</button>
+            <span id="clone-test-status" class="hint" style="margin:0;">Sẵn sàng test.</span>
           </div>
         </div>
       </div>

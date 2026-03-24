@@ -90,6 +90,23 @@ class App {
         this._lastStreamErrorToastTs = { A: 0, B: 0 };
         this._lastSonioxTransientToastTs = 0;
         this._streamBInjectBypassUntil = 0;
+        this._elevenLabsBuiltinVoices = [
+            { voice_id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel — Female' },
+            { voice_id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah — Female' },
+            { voice_id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel — Male' },
+            { voice_id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam — Male' },
+        ];
+        this._elevenLabsVoiceCache = [];
+        this._voiceCloneRecorder = null;
+        this._voiceCloneStream = null;
+        this._voiceCloneChunks = [];
+        this._voiceCloneAudioBlob = null;
+        this._voiceCloneAudioMime = 'audio/webm';
+        this._voiceCloneAudioFilename = 'voice-sample.webm';
+        this._voiceCloneTimerId = null;
+        this._voiceCloneStartedAt = 0;
+        this._lastClonePreviewUrl = null;
+        this._restoredCloneRecording = false;
     }
 
     async init() {
@@ -304,6 +321,7 @@ class App {
 
         // Settings form elements
         this._bindSettingsForm();
+        this._bindElevenLabsCloneEvents();
 
         // Manual drag for settings view
         // data-tauri-drag-region doesn't work well when parent contains buttons
@@ -555,6 +573,57 @@ class App {
 
     _bindSettingsForm() {
         // These are handled in _populateSettingsForm and _saveSettingsFromForm
+    }
+
+    _bindElevenLabsCloneEvents() {
+        document.getElementById('btn-clone-record-start')?.addEventListener('click', async () => {
+            await this._startVoiceCloneRecording();
+        });
+
+        document.getElementById('btn-clone-record-stop')?.addEventListener('click', async () => {
+            await this._stopVoiceCloneRecording({ finalize: true });
+        });
+
+        document.getElementById('btn-create-cloned-voice')?.addEventListener('click', async () => {
+            await this._createElevenLabsVoiceFromRecording();
+        });
+
+        document.getElementById('btn-refresh-elevenlabs-voices')?.addEventListener('click', async () => {
+            await this._refreshElevenLabsVoicesFromApi({ silent: false });
+        });
+
+        document.getElementById('btn-apply-cloned-voice')?.addEventListener('click', async () => {
+            const select = document.getElementById('select-cloned-voice-id');
+            const voiceId = select?.value;
+            if (!voiceId) {
+                this._showToast('Chọn voice trước khi áp dụng', 'info');
+                return;
+            }
+
+            try {
+                await settingsManager.save({
+                    elevenlabs_selected_clone_voice_id: voiceId,
+                    tts_voice_id: voiceId,
+                    stream_a_elevenlabs_voice_id: voiceId,
+                    stream_b_elevenlabs_voice_id: voiceId,
+                });
+
+                const settings = settingsManager.get();
+                this._syncElevenLabsVoiceOptions(settings, voiceId);
+                this._showToast('Đã áp dụng voice_id cho ElevenLabs TTS', 'success');
+            } catch (err) {
+                console.error('[ElevenLabs] Failed to apply selected cloned voice:', err);
+                this._showToast(`Không thể lưu voice: ${err}`, 'error');
+            }
+        });
+
+        document.getElementById('input-clone-voice-name')?.addEventListener('input', () => {
+            this._updateCloneCreateButtonState();
+        });
+
+        document.getElementById('btn-test-cloned-voice')?.addEventListener('click', async () => {
+            await this._testElevenLabsSampleText();
+        });
     }
 
     _bindQuickLocaleControls() {
@@ -1387,6 +1456,18 @@ class App {
             this._updateTTSProviderUI(providerSelect.value);
         }
 
+        const cloneVoiceNameInput = document.getElementById('input-clone-voice-name');
+        if (cloneVoiceNameInput && !cloneVoiceNameInput.value) {
+            const stamp = new Date().toISOString().slice(0, 10);
+            cloneVoiceNameInput.value = `My Voice ${stamp}`;
+        }
+
+        if (!this._restoredCloneRecording) {
+            this._restoreLastVoiceCloneRecording().catch((err) => {
+                console.warn('[ElevenLabs] Failed to restore last recording:', err);
+            });
+        }
+
         // Dual mode settings
         const selStreamASrc = document.getElementById('select-stream-a-source');
         if (selStreamASrc) selStreamASrc.value = s.stream_a_language_source || 'auto';
@@ -1473,6 +1554,8 @@ class App {
         if (streamBGoogleSpeedLabel) streamBGoogleSpeedLabel.textContent = `${Number(streamBGoogleSpeed).toFixed(1)}x`;
         const streamBElevenLabsVoice = document.getElementById('select-stream-b-elevenlabs-voice');
         if (streamBElevenLabsVoice) streamBElevenLabsVoice.value = s.stream_b_elevenlabs_voice_id || s.tts_voice_id || '21m00Tcm4TlvDq8ikWAM';
+        this._syncElevenLabsVoiceOptions(s);
+        this._updateCloneCreateButtonState();
         this._syncTranslationVoiceOptions(s);
         // Mixer settings
         const mixerCfg = s.mixer || {};
@@ -1553,6 +1636,10 @@ class App {
         // TTS settings
         settings.tts_provider = document.getElementById('select-tts-provider')?.value || 'edge';
         settings.elevenlabs_api_key = document.getElementById('input-elevenlabs-key').value.trim();
+        settings.elevenlabs_cloned_voices = this._getMergedElevenLabsVoices(prevSettings, this._elevenLabsVoiceCache);
+        settings.elevenlabs_selected_clone_voice_id = document.getElementById('select-cloned-voice-id')?.value
+            || prevSettings.elevenlabs_selected_clone_voice_id
+            || '';
         settings.tts_voice_id = document.getElementById('select-stream-a-elevenlabs-voice')?.value
             || prevSettings.stream_a_elevenlabs_voice_id
             || prevSettings.tts_voice_id
@@ -1664,6 +1751,8 @@ class App {
     // ─── Apply Settings ────────────────────────────────────
 
     _applySettings(settings) {
+        this._syncElevenLabsVoiceOptions(settings);
+
         // Update overlay opacity
         const overlayView = document.getElementById('overlay-view');
         overlayView.style.opacity = settings.overlay_opacity || 0.85;
@@ -1878,6 +1967,511 @@ class App {
             `<button type="button" class="btn-remove-term" title="Remove">×</button>`;
         row.querySelector('.btn-remove-term').addEventListener('click', () => row.remove());
         list.appendChild(row);
+    }
+
+    _normalizeElevenLabsVoice(voice) {
+        if (!voice || !voice.voice_id) return null;
+        return {
+            voice_id: String(voice.voice_id),
+            name: String(voice.name || voice.voice_id),
+        };
+    }
+
+    _getMergedElevenLabsVoices(settings = {}, runtimeVoices = []) {
+        const merged = new Map();
+        const push = (voice) => {
+            const normalized = this._normalizeElevenLabsVoice(voice);
+            if (!normalized) return;
+            merged.set(normalized.voice_id, normalized);
+        };
+
+        this._elevenLabsBuiltinVoices.forEach(push);
+        (settings?.elevenlabs_cloned_voices || []).forEach(push);
+        (runtimeVoices || []).forEach(push);
+        return Array.from(merged.values());
+    }
+
+    _populateElevenLabsVoiceSelect(selectEl, voices, selectedId) {
+        if (!selectEl) return;
+        const current = selectedId || selectEl.value || '';
+        selectEl.innerHTML = '';
+        voices.forEach((voice) => {
+            const option = document.createElement('option');
+            option.value = voice.voice_id;
+            option.textContent = `${voice.name} (${voice.voice_id.slice(0, 8)}...)`;
+            selectEl.appendChild(option);
+        });
+
+        const fallback = voices[0]?.voice_id || '';
+        const found = voices.some((voice) => voice.voice_id === current);
+        selectEl.value = found ? current : fallback;
+    }
+
+    _syncElevenLabsVoiceOptions(settings = {}, preferredVoiceId = null) {
+        const voices = this._getMergedElevenLabsVoices(settings, this._elevenLabsVoiceCache);
+        const selectedVoiceId = preferredVoiceId
+            || settings?.elevenlabs_selected_clone_voice_id
+            || settings?.stream_a_elevenlabs_voice_id
+            || settings?.tts_voice_id
+            || '21m00Tcm4TlvDq8ikWAM';
+
+        this._populateElevenLabsVoiceSelect(document.getElementById('select-stream-a-elevenlabs-voice'), voices, settings?.stream_a_elevenlabs_voice_id || selectedVoiceId);
+        this._populateElevenLabsVoiceSelect(document.getElementById('select-stream-b-elevenlabs-voice'), voices, settings?.stream_b_elevenlabs_voice_id || selectedVoiceId);
+        this._populateElevenLabsVoiceSelect(document.getElementById('select-cloned-voice-id'), voices, selectedVoiceId);
+    }
+
+    _formatRecordTimer(seconds) {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+
+    _updateCloneCreateButtonState() {
+        const btn = document.getElementById('btn-create-cloned-voice');
+        const voiceName = document.getElementById('input-clone-voice-name')?.value?.trim();
+        const apiKey = document.getElementById('input-elevenlabs-key')?.value?.trim();
+        if (!btn) return;
+        btn.disabled = !(this._voiceCloneAudioBlob && voiceName && apiKey);
+    }
+
+    _setCloneStatus(message, type = 'info') {
+        const statusEl = document.getElementById('clone-status');
+        if (!statusEl) return;
+        statusEl.textContent = message;
+        statusEl.style.color = type === 'error'
+            ? 'var(--danger)'
+            : type === 'success'
+                ? 'var(--success)'
+                : 'var(--text-secondary)';
+    }
+
+    _setCloneTestStatus(message, type = 'info') {
+        const statusEl = document.getElementById('clone-test-status');
+        if (!statusEl) return;
+        statusEl.textContent = message;
+        statusEl.style.color = type === 'error'
+            ? 'var(--danger)'
+            : type === 'success'
+                ? 'var(--success)'
+                : 'var(--text-secondary)';
+    }
+
+    _sanitizeApiKey(rawApiKey) {
+        let value = String(rawApiKey || '').trim().replace(/^['\"]|['\"]$/g, '');
+        value = value.replace(/^xi-api-key\s*:\s*/i, '');
+        value = value.replace(/^authorization\s*:\s*bearer\s+/i, '');
+        value = value.replace(/^bearer\s+/i, '');
+        return value.trim();
+    }
+
+    _extractElevenLabsError(payload, response) {
+        if (!payload) {
+            return `HTTP ${response?.status || 'Unknown'} ${response?.statusText || ''}`.trim();
+        }
+
+        if (typeof payload === 'string') {
+            return payload;
+        }
+
+        const detail = payload.detail;
+        if (typeof detail === 'string') return detail;
+        if (Array.isArray(detail)) {
+            const first = detail[0];
+            if (typeof first === 'string') return first;
+            if (first && typeof first === 'object') {
+                return first.message || first.msg || JSON.stringify(first);
+            }
+        }
+        if (detail && typeof detail === 'object') {
+            return detail.message || detail.msg || JSON.stringify(detail);
+        }
+
+        if (typeof payload.message === 'string') return payload.message;
+        if (typeof payload.error === 'string') return payload.error;
+
+        try {
+            return JSON.stringify(payload);
+        } catch {
+            return `HTTP ${response?.status || 'Unknown'} ${response?.statusText || ''}`.trim();
+        }
+    }
+
+    async _fetchElevenLabsWithAuthFallback(url, { method = 'GET', headers = {}, body } = {}, apiKey) {
+        const key = this._sanitizeApiKey(apiKey);
+        const send = (authHeaders) => fetch(url, {
+            method,
+            headers: {
+                ...headers,
+                ...authHeaders,
+            },
+            body,
+        });
+
+        let response = await send({ 'xi-api-key': key });
+        if (response.status !== 401) {
+            return response;
+        }
+
+        response = await send({ Authorization: `Bearer ${key}` });
+        return response;
+    }
+
+    async _blobToBase64(blob) {
+        const arrayBuffer = await blob.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+            const chunk = bytes.subarray(i, i + chunkSize);
+            binary += String.fromCharCode(...chunk);
+        }
+        return btoa(binary);
+    }
+
+    _setClonePreviewBlob(blob) {
+        this._voiceCloneAudioBlob = blob;
+
+        const preview = document.getElementById('clone-audio-preview');
+        if (!preview) return;
+
+        if (this._lastClonePreviewUrl) {
+            try {
+                URL.revokeObjectURL(this._lastClonePreviewUrl);
+            } catch {
+                // ignore revoke errors
+            }
+            this._lastClonePreviewUrl = null;
+        }
+
+        if (blob && blob.size > 0) {
+            const objectUrl = URL.createObjectURL(blob);
+            this._lastClonePreviewUrl = objectUrl;
+            preview.src = objectUrl;
+            preview.style.display = '';
+        } else {
+            preview.removeAttribute('src');
+            preview.style.display = 'none';
+        }
+    }
+
+    async _persistLastVoiceCloneRecording(blob) {
+        if (!blob || blob.size === 0) return;
+
+        const audioBase64 = await this._blobToBase64(blob);
+        await invoke('elevenlabs_save_last_recording', {
+            audioBase64,
+            mimeType: blob.type || this._voiceCloneAudioMime || 'audio/webm',
+            filename: this._voiceCloneAudioFilename || 'voice-sample.webm',
+        });
+    }
+
+    async _restoreLastVoiceCloneRecording() {
+        const last = await invoke('elevenlabs_get_last_recording');
+        this._restoredCloneRecording = true;
+        if (!last?.audio_base64) return;
+
+        const base64 = String(last.audio_base64);
+        const mimeType = String(last.mime_type || 'audio/webm');
+        const filename = String(last.filename || 'voice-sample.webm');
+
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+
+        const blob = new Blob([bytes], { type: mimeType });
+        this._voiceCloneAudioMime = mimeType;
+        this._voiceCloneAudioFilename = filename;
+        this._setClonePreviewBlob(blob);
+        this._setCloneStatus('Đã nạp bản ghi âm gần nhất để test lại.', 'success');
+        this._updateCloneCreateButtonState();
+    }
+
+    async _startVoiceCloneRecording() {
+        try {
+            if (this._voiceCloneRecorder && this._voiceCloneRecorder.state === 'recording') return;
+
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    channelCount: 1,
+                    sampleRate: 44100,
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                },
+            });
+
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                ? 'audio/webm;codecs=opus'
+                : 'audio/webm';
+
+            this._voiceCloneStream = stream;
+            this._voiceCloneChunks = [];
+            this._setClonePreviewBlob(null);
+            this._updateCloneCreateButtonState();
+
+            this._voiceCloneRecorder = new MediaRecorder(stream, { mimeType });
+            this._voiceCloneRecorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    this._voiceCloneChunks.push(event.data);
+                }
+            };
+
+            this._voiceCloneRecorder.onstop = () => {
+                const blob = new Blob(this._voiceCloneChunks, { type: mimeType });
+                const hasAudio = blob.size > 0;
+                this._voiceCloneAudioMime = mimeType;
+                this._voiceCloneAudioFilename = 'voice-sample.webm';
+                this._setClonePreviewBlob(hasAudio ? blob : null);
+                if (hasAudio) {
+                    this._persistLastVoiceCloneRecording(blob).catch((err) => {
+                        console.warn('[ElevenLabs] Failed to persist last recording:', err);
+                    });
+                }
+
+                this._setCloneStatus(this._voiceCloneAudioBlob ? 'Đã ghi âm xong. Có thể tạo voice ID.' : 'Không thu được âm thanh.', this._voiceCloneAudioBlob ? 'success' : 'error');
+                this._updateCloneCreateButtonState();
+            };
+
+            this._voiceCloneStartedAt = Date.now();
+            const timerEl = document.getElementById('clone-record-timer');
+            if (timerEl) timerEl.textContent = '00:00';
+            this._voiceCloneTimerId = window.setInterval(() => {
+                const elapsed = Math.floor((Date.now() - this._voiceCloneStartedAt) / 1000);
+                if (timerEl) timerEl.textContent = this._formatRecordTimer(elapsed);
+                if (elapsed >= 60) {
+                    this._stopVoiceCloneRecording({ finalize: true });
+                }
+            }, 1000);
+
+            this._voiceCloneRecorder.start();
+            document.getElementById('btn-clone-record-start')?.setAttribute('disabled', 'disabled');
+            document.getElementById('btn-clone-record-stop')?.removeAttribute('disabled');
+            this._setCloneStatus('Đang ghi âm... Hãy nói liên tục khoảng 1 phút.');
+        } catch (err) {
+            console.error('[ElevenLabs] Failed to start recording:', err);
+            this._setCloneStatus(`Không thể bắt đầu ghi âm: ${err}`, 'error');
+            this._showToast(`Recording error: ${err}`, 'error');
+        }
+    }
+
+    async _stopVoiceCloneRecording({ finalize = false } = {}) {
+        const recorder = this._voiceCloneRecorder;
+        if (recorder && recorder.state === 'recording') {
+            recorder.stop();
+        }
+
+        if (this._voiceCloneTimerId) {
+            clearInterval(this._voiceCloneTimerId);
+            this._voiceCloneTimerId = null;
+        }
+
+        document.getElementById('btn-clone-record-start')?.removeAttribute('disabled');
+        document.getElementById('btn-clone-record-stop')?.setAttribute('disabled', 'disabled');
+
+        if (this._voiceCloneStream) {
+            this._voiceCloneStream.getTracks().forEach((track) => track.stop());
+            this._voiceCloneStream = null;
+        }
+
+        if (!finalize) {
+            this._setCloneStatus('Đã dừng ghi âm.');
+        }
+    }
+
+    async _createElevenLabsVoiceFromRecording() {
+        const settings = settingsManager.get();
+        const apiKey = this._sanitizeApiKey(
+            document.getElementById('input-elevenlabs-key')?.value?.trim() || settings.elevenlabs_api_key
+        );
+        const voiceName = document.getElementById('input-clone-voice-name')?.value?.trim();
+
+        if (!apiKey) {
+            this._showToast('Thiếu ElevenLabs API key', 'error');
+            return;
+        }
+        if (!voiceName) {
+            this._showToast('Nhập tên voice trước khi tạo', 'info');
+            return;
+        }
+        if (!this._voiceCloneAudioBlob) {
+            this._showToast('Bạn cần ghi âm mẫu giọng trước', 'info');
+            return;
+        }
+
+        const btn = document.getElementById('btn-create-cloned-voice');
+        const prevText = btn?.textContent;
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Creating...';
+        }
+
+        try {
+            const audioBase64 = await this._blobToBase64(this._voiceCloneAudioBlob);
+            const payload = await invoke('elevenlabs_create_voice', {
+                apiKey,
+                voiceName,
+                audioBase64,
+                mimeType: this._voiceCloneAudioBlob?.type || this._voiceCloneAudioMime || 'audio/webm',
+                filename: this._voiceCloneAudioFilename || 'voice-sample.webm',
+            });
+
+            const voiceId = payload?.voice_id;
+            if (!voiceId) {
+                throw new Error('ElevenLabs response missing voice_id');
+            }
+
+            const createdVoice = {
+                voice_id: voiceId,
+                name: payload?.name || voiceName,
+            };
+            this._elevenLabsVoiceCache = this._getMergedElevenLabsVoices(settings, [createdVoice]);
+
+            await settingsManager.save({
+                elevenlabs_api_key: apiKey,
+                elevenlabs_cloned_voices: this._elevenLabsVoiceCache,
+                elevenlabs_selected_clone_voice_id: voiceId,
+                tts_voice_id: voiceId,
+                stream_a_elevenlabs_voice_id: voiceId,
+                stream_b_elevenlabs_voice_id: voiceId,
+            });
+
+            const next = settingsManager.get();
+            this._syncElevenLabsVoiceOptions(next, voiceId);
+            this._showToast('Tạo voice_id thành công', 'success');
+            this._setCloneStatus(`Đã tạo voice_id: ${voiceId}`, 'success');
+        } catch (err) {
+            console.error('[ElevenLabs] Failed to create cloned voice:', err);
+            this._showToast(`Create voice failed: ${err}`, 'error');
+            this._setCloneStatus(`Tạo voice lỗi: ${err}`, 'error');
+        } finally {
+            if (btn) {
+                btn.textContent = prevText || 'Create Voice ID';
+                this._updateCloneCreateButtonState();
+            }
+        }
+    }
+
+    async _refreshElevenLabsVoicesFromApi({ silent = true } = {}) {
+        const settings = settingsManager.get();
+        const apiKey = this._sanitizeApiKey(
+            document.getElementById('input-elevenlabs-key')?.value?.trim() || settings.elevenlabs_api_key
+        );
+
+        if (!apiKey) {
+            if (!silent) this._showToast('Thiếu ElevenLabs API key', 'info');
+            return;
+        }
+
+        try {
+            const response = await this._fetchElevenLabsWithAuthFallback('https://api.elevenlabs.io/v1/voices', {
+                method: 'GET',
+            }, apiKey);
+
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                const detail = this._extractElevenLabsError(payload, response);
+                throw new Error(`HTTP ${response.status}: ${detail}`);
+            }
+
+            const apiVoices = Array.isArray(payload?.voices)
+                ? payload.voices.map((voice) => this._normalizeElevenLabsVoice(voice)).filter(Boolean)
+                : [];
+
+            this._elevenLabsVoiceCache = this._getMergedElevenLabsVoices(settings, apiVoices);
+            await settingsManager.save({
+                elevenlabs_api_key: apiKey,
+                elevenlabs_cloned_voices: this._elevenLabsVoiceCache,
+            });
+
+            this._syncElevenLabsVoiceOptions(settingsManager.get());
+            if (!silent) this._showToast(`Đã tải ${apiVoices.length} voice từ ElevenLabs`, 'success');
+        } catch (err) {
+            console.error('[ElevenLabs] Failed to refresh voices:', err);
+            if (!silent) this._showToast(`Không thể tải voice list: ${err}`, 'error');
+        }
+    }
+
+    async _testElevenLabsSampleText() {
+        const settings = settingsManager.get();
+        const apiKey = this._sanitizeApiKey(
+            document.getElementById('input-elevenlabs-key')?.value?.trim() || settings.elevenlabs_api_key
+        );
+        const voiceId = document.getElementById('select-cloned-voice-id')?.value
+            || settings.elevenlabs_selected_clone_voice_id
+            || settings.tts_voice_id
+            || '21m00Tcm4TlvDq8ikWAM';
+        const sampleText = document.getElementById('input-clone-sample-text')?.value?.trim();
+
+        if (!apiKey) {
+            this._setCloneTestStatus('Thiếu ElevenLabs API key.', 'error');
+            this._showToast('Thiếu ElevenLabs API key', 'error');
+            return;
+        }
+        if (!sampleText) {
+            this._setCloneTestStatus('Nhập sample text để test.', 'error');
+            return;
+        }
+
+        const btn = document.getElementById('btn-test-cloned-voice');
+        const prevText = btn?.textContent;
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Testing...';
+        }
+        this._setCloneTestStatus('Đang synthesize sample text...');
+
+        try {
+            const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
+            const response = await this._fetchElevenLabsWithAuthFallback(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'audio/mpeg',
+                },
+                body: JSON.stringify({
+                    text: sampleText,
+                    model_id: 'eleven_flash_v2_5',
+                    output_format: 'mp3_44100_128',
+                    voice_settings: {
+                        stability: 0.5,
+                        similarity_boost: 0.75,
+                    },
+                }),
+            }, apiKey);
+
+            if (!response.ok) {
+                const maybeJson = await response.json().catch(() => null);
+                const detail = this._extractElevenLabsError(maybeJson, response);
+                throw new Error(`HTTP ${response.status}: ${detail}`);
+            }
+
+            const audioBuffer = await response.arrayBuffer();
+            if (!audioBuffer || audioBuffer.byteLength === 0) {
+                throw new Error('Empty audio response');
+            }
+
+            const bytes = new Uint8Array(audioBuffer);
+            let binary = '';
+            const chunkSize = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+                const chunk = bytes.subarray(i, i + chunkSize);
+                binary += String.fromCharCode(...chunk);
+            }
+            const base64Audio = btoa(binary);
+            audioPlayer.enqueue(base64Audio);
+
+            this._setCloneTestStatus('Đang phát sample text...', 'success');
+        } catch (err) {
+            console.error('[ElevenLabs] Sample text test failed:', err);
+            this._setCloneTestStatus(`Test lỗi: ${err}`, 'error');
+            this._showToast(`Test voice thất bại: ${err}`, 'error');
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = prevText || 'Test Voice';
+            }
+        }
     }
 
     _updateTTSProviderUI(provider) {

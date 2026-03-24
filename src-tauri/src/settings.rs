@@ -18,6 +18,14 @@ pub struct CustomContext {
     pub translation_terms: Vec<TranslationTerm>,
 }
 
+/// ElevenLabs voice metadata persisted from frontend voice clone workflow
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct ElevenLabsVoice {
+    pub voice_id: String,
+    pub name: String,
+}
+
 /// Smart Audio Mixer & Ducking configuration
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -74,6 +82,10 @@ pub struct Settings {
     pub custom_context: Option<CustomContext>,
     /// ElevenLabs API key for TTS narration
     pub elevenlabs_api_key: String,
+    /// Cached ElevenLabs voice list (builtin + cloned)
+    pub elevenlabs_cloned_voices: Vec<ElevenLabsVoice>,
+    /// Last selected ElevenLabs cloned voice id in settings
+    pub elevenlabs_selected_clone_voice_id: String,
     /// Whether TTS narration is enabled
     pub tts_enabled: bool,
     /// TTS provider: "edge" | "elevenlabs" | "google"
@@ -142,6 +154,8 @@ impl Default for Settings {
             translation_mode: "soniox".to_string(),
             custom_context: None,
             elevenlabs_api_key: String::new(),
+            elevenlabs_cloned_voices: Vec::new(),
+            elevenlabs_selected_clone_voice_id: String::new(),
             tts_enabled: false,
             tts_provider: "edge".to_string(),
             tts_voice_id: "21m00Tcm4TlvDq8ikWAM".to_string(),
