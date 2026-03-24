@@ -126,6 +126,21 @@ Xem [Hướng dẫn TTS](tts_guide_vi.md) để biết cách lấy API key từn
 
 ---
 
+## Bước 9 — One-click cài BlackHole (Tuỳ chọn, để inject vào meeting)
+
+Nếu bạn dùng **Dual mode** và muốn đẩy giọng dịch vào Zoom/Meet/Teams:
+
+1. Mở **Settings** → tab **Mixer**
+2. Bấm **Install BlackHole**
+3. App sẽ cài `blackhole-2ch` qua Homebrew
+4. Chờ trạng thái báo đã cài xong
+
+Sau khi cài thành công, app sẽ tự bật **Stream B inject**.
+
+Nếu cài tự động lỗi, app sẽ gợi ý mở link tải BlackHole chính thức để cài thủ công.
+
+---
+
 ## Phím tắt
 
 | Phím tắt | Chức năng |
@@ -152,3 +167,6 @@ Xem [Hướng dẫn TTS](tts_guide_vi.md) để biết cách lấy API key từn
 
 ### TTS không hoạt động
 → Xem [Hướng dẫn TTS — Xử lý sự cố](tts_guide_vi.md#xử-lý-sự-cố)
+
+### Stream B inject không vào được app họp
+→ Vào Settings → Mixer và chạy **Install BlackHole** (Bước 9), sau đó chọn BlackHole làm microphone/input trong Zoom/Meet/Teams.

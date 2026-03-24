@@ -1425,18 +1425,25 @@ input[type="range"]::-webkit-slider-thumb:hover {
   bottom: 16px;
   left: 50%;
   transform: translateX(-50%) translateY(50px);
-  padding: 8px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 14px;
   border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 500;
-  pointer-events: none;
+  pointer-events: auto;
   opacity: 0;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   z-index: 1000;
   max-width: 90%;
-  text-align: center;
+  text-align: left;
   line-height: 1.4;
   backdrop-filter: blur(10px);
+}
+
+.toast-message {
+  overflow-wrap: anywhere;
 }
 
 .toast.show {
@@ -1454,6 +1461,31 @@ input[type="range"]::-webkit-slider-thumb:hover {
   background: rgba(248, 113, 113, 0.15);
   color: var(--error);
   border: 1px solid rgba(248, 113, 113, 0.2);
+}
+
+.toast-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.18);
+  color: inherit;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.toast-copy-btn:hover {
+  background: rgba(0, 0, 0, 0.3);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.toast-copy-btn.copied {
+  border-color: rgba(74, 222, 128, 0.5);
+  color: var(--success);
 }
 
 /* ─── Animations ───────────────────────────────────────── */

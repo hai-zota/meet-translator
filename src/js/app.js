@@ -107,6 +107,10 @@ class App {
         this._voiceCloneStartedAt = 0;
         this._lastClonePreviewUrl = null;
         this._restoredCloneRecording = false;
+        this._blackHoleSetupBusy = false;
+        this._blackHoleInstallUrl = 'https://github.com/ExistentialAudio/BlackHole/releases/latest';
+        this._toastHideTimer = null;
+        this._toastRemoveTimer = null;
     }
 
     async init() {
@@ -123,6 +127,7 @@ class App {
         // Apply saved settings to UI
         this._applySettings(settingsManager.get());
         this._syncQuickLocaleControls(settingsManager.get());
+        this._refreshBlackHoleSetupStatus();
 
         // Bind event listeners
         this._bindEvents();
@@ -394,6 +399,10 @@ class App {
         document.getElementById('btn-toggle-google-key')?.addEventListener('click', () => {
             const input = document.getElementById('input-google-tts-key');
             input.type = input.type === 'password' ? 'text' : 'password';
+        });
+
+        document.getElementById('btn-install-blackhole')?.addEventListener('click', async () => {
+            await this._installBlackHole();
         });
 
         // Settings tab switching
@@ -1399,6 +1408,111 @@ class App {
 
         if (view === 'settings') {
             this._populateSettingsForm();
+            this._refreshBlackHoleSetupStatus();
+        }
+    }
+
+    async _refreshBlackHoleSetupStatus() {
+        const statusEl = document.getElementById('blackhole-setup-status');
+        const buttonEl = document.getElementById('btn-install-blackhole');
+        if (!statusEl || !buttonEl) return;
+
+        if (this._blackHoleSetupBusy) {
+            buttonEl.disabled = true;
+            statusEl.textContent = 'Installing BlackHole...';
+            return;
+        }
+
+        statusEl.textContent = 'Checking BlackHole status...';
+        buttonEl.disabled = true;
+
+        try {
+            const status = await invoke('get_blackhole_setup_status');
+            this._blackHoleInstallUrl = status?.installUrl || this._blackHoleInstallUrl;
+            if (!status.supported) {
+                statusEl.textContent = status.message || 'BlackHole one-click setup is only available on macOS.';
+                buttonEl.textContent = 'macOS Only';
+                buttonEl.disabled = true;
+                return;
+            }
+
+            statusEl.textContent = status.message || (status.installed ? 'BlackHole is installed.' : 'BlackHole is not installed.');
+            buttonEl.textContent = status.installed ? 'Recheck BlackHole' : 'Install BlackHole';
+            buttonEl.disabled = false;
+        } catch (err) {
+            statusEl.textContent = `Failed to check BlackHole: ${err}`;
+            buttonEl.textContent = 'Retry Check';
+            buttonEl.disabled = false;
+        }
+    }
+
+    async _installBlackHole() {
+        if (this._blackHoleSetupBusy) return;
+
+        const buttonEl = document.getElementById('btn-install-blackhole');
+        const statusEl = document.getElementById('blackhole-setup-status');
+
+        this._blackHoleSetupBusy = true;
+        if (buttonEl) {
+            buttonEl.disabled = true;
+            buttonEl.textContent = 'Installing...';
+        }
+        if (statusEl) {
+            statusEl.textContent = 'Installing BlackHole via Homebrew...';
+        }
+
+        try {
+            const status = await invoke('install_blackhole');
+            this._blackHoleInstallUrl = status?.installUrl || this._blackHoleInstallUrl;
+
+            if (status?.installed) {
+                const checkInject = document.getElementById('check-stream-b-inject');
+                if (checkInject && !checkInject.checked) {
+                    checkInject.checked = true;
+                    this._syncInjectMixerControls();
+                }
+
+                const settings = settingsManager.get();
+                if (!settings.stream_b_inject_enabled) {
+                    await settingsManager.save({ stream_b_inject_enabled: true });
+                }
+
+                this._showToast('BlackHole installed successfully', 'success');
+                if (statusEl) {
+                    statusEl.textContent = status.message || 'BlackHole 2ch is installed, and Stream B inject was enabled.';
+                }
+            } else {
+                this._showToast(
+                    status?.message || 'BlackHole install finished, but device registration is delayed. Recheck after restarting audio apps.',
+                    'info'
+                );
+                if (statusEl) {
+                    statusEl.textContent = status?.message
+                        || 'Install finished, but BlackHole is not visible yet. Restart audio apps (or reboot), then Recheck.';
+                }
+            }
+        } catch (err) {
+            this._showToast(`BlackHole setup failed: ${err}`, 'error');
+            if (statusEl) {
+                statusEl.textContent = `BlackHole setup failed: ${err}`;
+            }
+
+            try {
+                const status = await invoke('get_blackhole_setup_status');
+                this._blackHoleInstallUrl = status?.installUrl || this._blackHoleInstallUrl;
+            } catch {
+                // Keep fallback URL if status check itself fails.
+            }
+
+            const shouldOpen = window.confirm(
+                'Automatic BlackHole setup failed. Do you want to open the official download page for manual install?'
+            );
+            if (shouldOpen && this._blackHoleInstallUrl) {
+                window.__TAURI__.opener.openUrl(this._blackHoleInstallUrl);
+            }
+        } finally {
+            this._blackHoleSetupBusy = false;
+            await this._refreshBlackHoleSetupStatus();
         }
     }
 
@@ -3898,9 +4012,44 @@ class App {
         const existing = document.querySelector('.toast');
         if (existing) existing.remove();
 
+        if (this._toastHideTimer) {
+            clearTimeout(this._toastHideTimer);
+            this._toastHideTimer = null;
+        }
+        if (this._toastRemoveTimer) {
+            clearTimeout(this._toastRemoveTimer);
+            this._toastRemoveTimer = null;
+        }
+
+        const text = `${message ?? ''}`;
+
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
-        toast.textContent = message;
+
+        const messageEl = document.createElement('span');
+        messageEl.className = 'toast-message';
+        messageEl.textContent = text;
+        toast.appendChild(messageEl);
+
+        if (type === 'error') {
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'toast-copy-btn';
+            copyBtn.title = 'Copy error';
+            copyBtn.setAttribute('aria-label', 'Copy error');
+            copyBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>';
+            copyBtn.addEventListener('click', async () => {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    copyBtn.classList.add('copied');
+                    copyBtn.title = 'Copied';
+                } catch (err) {
+                    console.warn('[Toast] Failed to copy error:', err);
+                }
+            });
+            toast.appendChild(copyBtn);
+        }
+
         document.body.appendChild(toast);
 
         // Trigger animation
@@ -3909,10 +4058,10 @@ class App {
         });
 
         // Auto-remove (longer for errors)
-        const duration = type === 'error' ? 5000 : 3000;
-        setTimeout(() => {
+        const duration = type === 'error' ? 12000 : 3000;
+        this._toastHideTimer = setTimeout(() => {
             toast.classList.remove('show');
-            setTimeout(() => toast.remove(), 300);
+            this._toastRemoveTimer = setTimeout(() => toast.remove(), 300);
         }, duration);
     }
 }

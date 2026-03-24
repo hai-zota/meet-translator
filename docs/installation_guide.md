@@ -126,6 +126,21 @@ See [TTS Guide](tts_guide.md) for step-by-step API key instructions.
 
 ---
 
+## Step 9 — One-click BlackHole Setup (Optional, for Meeting Inject)
+
+If you use **Dual mode** and want translated speech injected back into Zoom/Meet/Teams input:
+
+1. Open **Settings** → **Mixer** tab
+2. Click **Install BlackHole**
+3. The app installs `blackhole-2ch` via Homebrew
+4. Wait until status shows BlackHole is installed
+
+After successful install, the app automatically enables **Stream B inject**.
+
+If automatic setup fails, the app offers a direct link to the official BlackHole download page.
+
+---
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -152,3 +167,6 @@ See [TTS Guide](tts_guide.md) for step-by-step API key instructions.
 
 ### TTS not working
 → See [TTS Guide — Troubleshooting](tts_guide.md#troubleshooting)
+
+### Stream B inject does not output to meeting app
+→ Open Settings → Mixer and run **Install BlackHole** (Step 9), then select BlackHole as your meeting input device.

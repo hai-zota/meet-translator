@@ -652,6 +652,11 @@
             <input type="checkbox" id="check-stream-b-inject" />
             <span class="checkbox-label">Inject into virtual audio device (BlackHole)</span>
           </label>
+          <div class="field-row" style="margin-top:8px; align-items:center; gap:10px; flex-wrap:wrap;">
+            <button type="button" id="btn-install-blackhole" class="secondary-btn">Install BlackHole</button>
+            <span id="blackhole-setup-status" class="hint" style="margin:0; flex:1 1 260px;">Checking BlackHole status...</span>
+          </div>
+          <p class="hint" style="margin-top:8px;">One-click setup installs BlackHole 2ch via Homebrew. If it fails, the app opens the official manual download page.</p>
           <label class="checkbox-option" style="margin-top:4px;">
             <input type="checkbox" id="check-stream-b-mix-original" />
             <span class="checkbox-label">Mix original mic with translated audio (for Meet input)</span>

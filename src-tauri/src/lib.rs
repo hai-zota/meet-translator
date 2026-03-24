@@ -89,6 +89,8 @@ pub fn run() {
             commands::mixer::mixer_update_settings,
             commands::mixer::mixer_get_stats,
             commands::mixer::mixer_reset,
+            commands::setup::get_blackhole_setup_status,
+            commands::setup::install_blackhole,
             commands::tts_player::play_tts_audio,
             commands::tts_player::stop_tts_audio,
             get_platform_info,
