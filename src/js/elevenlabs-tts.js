@@ -22,6 +22,10 @@ class ElevenLabsTTS {
         this._reconnectAttempts = 0;
         this._maxReconnectAttempts = 3;
         this._intentionalClose = false;
+        this._silentRecovering = false;
+        this._lastConnectionErrorAt = 0;
+        this._connectionErrorCooldownMs = 10000;
+        this._reportedConnectionErrorInCycle = false;
 
         // Instrumentation
         this._sendTimestamps = {};  // text -> timestamp
@@ -64,6 +68,8 @@ class ElevenLabsTTS {
             console.log('[ElevenLabs] WebSocket connected');
             this.isConnected = true;
             this._reconnectAttempts = 0;
+            this._silentRecovering = false;
+            this._reportedConnectionErrorInCycle = false;
 
             // Send BOS (Beginning of Stream) message with config
             this.ws.send(JSON.stringify({
@@ -107,7 +113,12 @@ class ElevenLabsTTS {
 
                 if (data.error) {
                     console.error('[ElevenLabs] Server error:', data.error);
-                    this.onError?.(`TTS error: ${data.error}`);
+                    const errText = String(data.error || '');
+                    if (/input_timeout_exceeded/i.test(errText)) {
+                        this._silentReconnect('input timeout');
+                        return;
+                    }
+                    this.onError?.(`TTS error: ${errText}`);
                 }
             } catch (e) {
                 console.warn('[ElevenLabs] Failed to parse message:', e);
@@ -116,7 +127,15 @@ class ElevenLabsTTS {
 
         this.ws.onerror = (err) => {
             console.error('[ElevenLabs] WebSocket error:', err);
-            this.onError?.('TTS connection error');
+            if (!this._silentRecovering) {
+                const now = Date.now();
+                const inCooldown = (now - this._lastConnectionErrorAt) < this._connectionErrorCooldownMs;
+                if (!this._reportedConnectionErrorInCycle || !inCooldown) {
+                    this._lastConnectionErrorAt = now;
+                    this._reportedConnectionErrorInCycle = true;
+                    this.onError?.('TTS connection unstable, đang tự reconnect...');
+                }
+            }
             this._setStatus('error');
         };
 
@@ -137,9 +156,25 @@ class ElevenLabsTTS {
                 setTimeout(() => this.connect(), delay);
             } else {
                 this._setStatus('disconnected');
+                this._silentRecovering = false;
+                this._reportedConnectionErrorInCycle = false;
                 this.onError?.('TTS disconnected after max retries');
             }
         };
+    }
+
+    _silentReconnect(reason = 'timeout') {
+        if (this._intentionalClose) return;
+        if (!this.ws || this.ws.readyState === WebSocket.CLOSED) return;
+
+        this._silentRecovering = true;
+        console.log(`[ElevenLabs] Silent reconnect requested (${reason})`);
+
+        try {
+            this.ws.close(4000, `silent-reconnect:${reason}`);
+        } catch {
+            // Ignore close errors; onclose path will handle retries.
+        }
     }
 
     /**
@@ -190,7 +225,9 @@ class ElevenLabsTTS {
      */
     disconnect() {
         this._intentionalClose = true;
+        this._silentRecovering = false;
         this._textQueue = [];
+        this._reportedConnectionErrorInCycle = false;
 
         // Log stats before disconnect
         if (this._stats.requests > 0) {

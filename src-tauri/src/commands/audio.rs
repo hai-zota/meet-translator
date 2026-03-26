@@ -55,7 +55,7 @@ fn forward_audio_to_channel(
     stop_flag: Arc<AtomicBool>,
 ) {
     let mut buffer: Vec<u8> = Vec::with_capacity(32000); // ~1 s at 16 kHz s16le
-    let batch_interval = std::time::Duration::from_millis(200);
+    let batch_interval = std::time::Duration::from_millis(120);
     let mut last_flush = std::time::Instant::now();
 
     loop {

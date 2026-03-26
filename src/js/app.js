@@ -96,6 +96,7 @@ class App {
             { voice_id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel — Male' },
             { voice_id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam — Male' },
         ];
+        this._elevenLabsApiVoices = [];
         this._elevenLabsVoiceCache = [];
         this._voiceCloneRecorder = null;
         this._voiceCloneStream = null;
@@ -664,6 +665,7 @@ class App {
                     if (streamATarget) streamATarget.value = settings.stream_a_language_target;
                     if (singleTarget) singleTarget.value = settings.target_language || settings.stream_a_language_target;
 
+                    this._syncElevenLabsVoiceOptions(settings);
                     this._syncTranslationVoiceOptions(settings);
                     const voiceChanged = this._syncDefaultVoiceForStream(settings, 'A', voiceStream);
                     this._syncQuickLocaleControls(settings);
@@ -713,6 +715,7 @@ class App {
                     const streamBTarget = document.getElementById('select-stream-b-target');
                     if (streamBTarget) streamBTarget.value = settings.stream_b_language_target;
 
+                    this._syncElevenLabsVoiceOptions(settings);
                     this._syncTranslationVoiceOptions(settings);
                     const voiceChanged = this._syncDefaultVoiceForStream(settings, 'B', 'B');
                     this._syncQuickLocaleControls(settings);
@@ -1570,6 +1573,13 @@ class App {
             this._updateTTSProviderUI(providerSelect.value);
         }
 
+        const currentElevenApiKey = this._sanitizeApiKey(
+            document.getElementById('input-elevenlabs-key')?.value?.trim() || s.elevenlabs_api_key
+        );
+        if (currentElevenApiKey) {
+            this._refreshElevenLabsVoicesFromApi({ silent: true });
+        }
+
         const cloneVoiceNameInput = document.getElementById('input-clone-voice-name');
         if (cloneVoiceNameInput && !cloneVoiceNameInput.value) {
             const stamp = new Date().toISOString().slice(0, 10);
@@ -2085,53 +2095,238 @@ class App {
 
     _normalizeElevenLabsVoice(voice) {
         if (!voice || !voice.voice_id) return null;
+        const labels = voice.labels || {};
+        const language = String(labels.language || voice.language || '').toLowerCase().trim();
+        const gender = String(labels.gender || voice.gender || '').toLowerCase().trim();
+        const category = String(voice.category || '').toLowerCase().trim();
         return {
             voice_id: String(voice.voice_id),
             name: String(voice.name || voice.voice_id),
+            language,
+            gender,
+            category,
         };
     }
 
-    _getMergedElevenLabsVoices(settings = {}, runtimeVoices = []) {
-        const merged = new Map();
-        const push = (voice) => {
-            const normalized = this._normalizeElevenLabsVoice(voice);
-            if (!normalized) return;
-            merged.set(normalized.voice_id, normalized);
-        };
+    _isMyElevenLabsVoice(voice) {
+        if (!voice) return false;
+        const category = String(voice.category || '').toLowerCase();
+        return category && category !== 'premade';
+    }
 
-        this._elevenLabsBuiltinVoices.forEach(push);
-        (settings?.elevenlabs_cloned_voices || []).forEach(push);
-        (runtimeVoices || []).forEach(push);
+    _elevenLabsLanguageHints(langCode) {
+        const map = {
+            vi: ['vietnamese', 'vi', 'multilingual'],
+            en: ['english', 'en', 'multilingual'],
+            ja: ['japanese', 'ja', 'multilingual'],
+            ko: ['korean', 'ko', 'multilingual'],
+            zh: ['chinese', 'mandarin', 'zh', 'multilingual'],
+            fr: ['french', 'fr', 'multilingual'],
+            de: ['german', 'de', 'multilingual'],
+            es: ['spanish', 'es', 'multilingual'],
+            th: ['thai', 'th', 'multilingual'],
+            id: ['indonesian', 'id', 'multilingual'],
+        };
+        return map[langCode] || ['multilingual'];
+    }
+
+    _matchElevenLabsLanguage(voice, langCode) {
+        const lang = String(voice?.language || '').toLowerCase();
+        if (!lang) return false;
+        const hints = this._elevenLabsLanguageHints(langCode);
+        return hints.some((hint) => lang.includes(hint));
+    }
+
+    _sortElevenLabsVoices(voices) {
+        return [...voices].sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+    }
+
+    _pickTopPremadeVoicesForLanguage(langCode) {
+        const source = this._elevenLabsApiVoices?.length
+            ? this._elevenLabsApiVoices
+            : this._elevenLabsBuiltinVoices;
+
+        const premade = source.filter((voice) => {
+            const category = String(voice.category || '').toLowerCase();
+            return !category || category === 'premade';
+        });
+
+        const languageMatched = premade.filter((voice) => this._matchElevenLabsLanguage(voice, langCode));
+        const candidate = languageMatched.length > 0 ? languageMatched : premade;
+
+        const female = this._sortElevenLabsVoices(candidate.filter((voice) => String(voice.gender || '').includes('female'))).slice(0, 2);
+        const male = this._sortElevenLabsVoices(candidate.filter((voice) => String(voice.gender || '').includes('male'))).slice(0, 2);
+
+        const top = [...female, ...male];
+        if (top.length >= 4) return top.slice(0, 4);
+
+        const used = new Set(top.map((voice) => voice.voice_id));
+        for (const voice of this._sortElevenLabsVoices(candidate)) {
+            if (top.length >= 4) break;
+            if (used.has(voice.voice_id)) continue;
+            top.push(voice);
+            used.add(voice.voice_id);
+        }
+        return top;
+    }
+
+    _getMyElevenLabsVoices(settings = {}) {
+        const fromApi = (this._elevenLabsApiVoices || []).filter((voice) => this._isMyElevenLabsVoice(voice));
+        const fromSettings = (settings?.elevenlabs_cloned_voices || []).map((voice) => this._normalizeElevenLabsVoice(voice)).filter(Boolean);
+        const merged = new Map();
+        [...fromApi, ...fromSettings].forEach((voice) => {
+            if (!voice?.voice_id) return;
+            merged.set(voice.voice_id, voice);
+        });
         return Array.from(merged.values());
     }
 
-    _populateElevenLabsVoiceSelect(selectEl, voices, selectedId) {
+    _mergeUniqueVoices(...voiceLists) {
+        const merged = new Map();
+        for (const list of voiceLists) {
+            (list || []).forEach((voice) => {
+                const normalized = this._normalizeElevenLabsVoice(voice);
+                if (!normalized) return;
+                merged.set(normalized.voice_id, normalized);
+            });
+        }
+        return Array.from(merged.values());
+    }
+
+    _getMergedElevenLabsVoices(settings = {}, runtimeVoices = []) {
+        return this._mergeUniqueVoices(
+            this._elevenLabsBuiltinVoices,
+            this._elevenLabsApiVoices,
+            settings?.elevenlabs_cloned_voices || [],
+            runtimeVoices || []
+        );
+    }
+
+    _inferElevenLabsLanguageCode(voice) {
+        const lang = String(voice?.language || '').toLowerCase();
+        if (!lang) return 'other';
+        if (lang.includes('vietnam')) return 'vi';
+        if (lang.includes('english')) return 'en';
+        if (lang.includes('japanese')) return 'ja';
+        if (lang.includes('korean')) return 'ko';
+        if (lang.includes('chinese') || lang.includes('mandarin')) return 'zh';
+        if (lang.includes('french')) return 'fr';
+        if (lang.includes('german')) return 'de';
+        if (lang.includes('spanish')) return 'es';
+        if (lang.includes('thai')) return 'th';
+        if (lang.includes('indonesian')) return 'id';
+        if (lang.includes('multilingual')) return 'multi';
+        return 'other';
+    }
+
+    _elevenLabsLanguageGroupLabel(code) {
+        const map = {
+            vi: '🇻🇳 Vietnamese',
+            en: '🇺🇸 English',
+            ja: '🇯🇵 Japanese',
+            ko: '🇰🇷 Korean',
+            zh: '🇨🇳 Chinese',
+            fr: '🇫🇷 French',
+            de: '🇩🇪 German',
+            es: '🇪🇸 Spanish',
+            th: '🇹🇭 Thai',
+            id: '🇮🇩 Indonesian',
+            multi: '🌐 Multilingual',
+            other: '🌍 Other',
+        };
+        return map[code] || map.other;
+    }
+
+    _groupElevenLabsVoicesByLanguage(voices) {
+        const buckets = new Map();
+        for (const voice of voices || []) {
+            const code = this._inferElevenLabsLanguageCode(voice);
+            if (!buckets.has(code)) buckets.set(code, []);
+            buckets.get(code).push(voice);
+        }
+
+        const order = ['vi', 'en', 'ja', 'ko', 'zh', 'fr', 'de', 'es', 'th', 'id', 'multi', 'other'];
+        const grouped = [];
+        for (const code of order) {
+            const list = buckets.get(code) || [];
+            if (list.length === 0) continue;
+            grouped.push({
+                label: this._elevenLabsLanguageGroupLabel(code),
+                voices: this._sortElevenLabsVoices(list),
+            });
+        }
+        return grouped;
+    }
+
+    _populateElevenLabsVoiceSelect(selectEl, { topVoices = [], myVoices = [] }, selectedId) {
         if (!selectEl) return;
         const current = selectedId || selectEl.value || '';
         selectEl.innerHTML = '';
-        voices.forEach((voice) => {
-            const option = document.createElement('option');
-            option.value = voice.voice_id;
-            option.textContent = `${voice.name} (${voice.voice_id.slice(0, 8)}...)`;
-            selectEl.appendChild(option);
+
+        const renderOptions = (container, voices) => {
+            (voices || []).forEach((voice) => {
+                const option = document.createElement('option');
+                option.value = voice.voice_id;
+                option.textContent = `${voice.name} (${voice.voice_id.slice(0, 8)}...)`;
+                container.appendChild(option);
+            });
+        };
+
+        const dedupMyVoices = this._mergeUniqueVoices(myVoices || []);
+        const dedupTopVoices = this._mergeUniqueVoices(topVoices || []).filter(
+            (voice) => !dedupMyVoices.some((myVoice) => myVoice.voice_id === voice.voice_id)
+        );
+
+        if (dedupMyVoices.length > 0) {
+            const myGroup = document.createElement('optgroup');
+            myGroup.label = '⭐ My Voices';
+            renderOptions(myGroup, this._sortElevenLabsVoices(dedupMyVoices));
+            selectEl.appendChild(myGroup);
+        }
+
+        const groupedTop = this._groupElevenLabsVoicesByLanguage(dedupTopVoices);
+        groupedTop.forEach((group) => {
+            const languageGroup = document.createElement('optgroup');
+            languageGroup.label = group.label;
+            renderOptions(languageGroup, group.voices);
+            selectEl.appendChild(languageGroup);
         });
 
-        const fallback = voices[0]?.voice_id || '';
-        const found = voices.some((voice) => voice.voice_id === current);
+        const allVoices = this._mergeUniqueVoices(dedupMyVoices, dedupTopVoices);
+        const fallback = allVoices[0]?.voice_id || '';
+        const found = allVoices.some((voice) => voice.voice_id === current);
         selectEl.value = found ? current : fallback;
     }
 
     _syncElevenLabsVoiceOptions(settings = {}, preferredVoiceId = null) {
-        const voices = this._getMergedElevenLabsVoices(settings, this._elevenLabsVoiceCache);
+        const langA = settings?.stream_a_language_target || settings?.target_language || 'vi';
+        const langB = settings?.stream_b_language_target || 'en';
+        const topA = this._pickTopPremadeVoicesForLanguage(langA);
+        const topB = this._pickTopPremadeVoicesForLanguage(langB);
+        const topMerged = this._mergeUniqueVoices(topA, topB);
+        const myVoices = this._getMyElevenLabsVoices(settings);
+
         const selectedVoiceId = preferredVoiceId
             || settings?.elevenlabs_selected_clone_voice_id
             || settings?.stream_a_elevenlabs_voice_id
             || settings?.tts_voice_id
             || '21m00Tcm4TlvDq8ikWAM';
 
-        this._populateElevenLabsVoiceSelect(document.getElementById('select-stream-a-elevenlabs-voice'), voices, settings?.stream_a_elevenlabs_voice_id || selectedVoiceId);
-        this._populateElevenLabsVoiceSelect(document.getElementById('select-stream-b-elevenlabs-voice'), voices, settings?.stream_b_elevenlabs_voice_id || selectedVoiceId);
-        this._populateElevenLabsVoiceSelect(document.getElementById('select-cloned-voice-id'), voices, selectedVoiceId);
+        this._populateElevenLabsVoiceSelect(
+            document.getElementById('select-stream-a-elevenlabs-voice'),
+            { topVoices: topA, myVoices },
+            settings?.stream_a_elevenlabs_voice_id || selectedVoiceId
+        );
+        this._populateElevenLabsVoiceSelect(
+            document.getElementById('select-stream-b-elevenlabs-voice'),
+            { topVoices: topB, myVoices },
+            settings?.stream_b_elevenlabs_voice_id || selectedVoiceId
+        );
+        this._populateElevenLabsVoiceSelect(
+            document.getElementById('select-cloned-voice-id'),
+            { topVoices: topMerged, myVoices },
+            selectedVoiceId
+        );
     }
 
     _formatRecordTimer(seconds) {
@@ -2478,24 +2673,18 @@ class App {
         }
 
         try {
-            const response = await this._fetchElevenLabsWithAuthFallback('https://api.elevenlabs.io/v1/voices', {
-                method: 'GET',
-            }, apiKey);
-
-            const payload = await response.json().catch(() => ({}));
-            if (!response.ok) {
-                const detail = this._extractElevenLabsError(payload, response);
-                throw new Error(`HTTP ${response.status}: ${detail}`);
-            }
+            const payload = await invoke('elevenlabs_list_voices', { apiKey });
 
             const apiVoices = Array.isArray(payload?.voices)
                 ? payload.voices.map((voice) => this._normalizeElevenLabsVoice(voice)).filter(Boolean)
                 : [];
 
-            this._elevenLabsVoiceCache = this._getMergedElevenLabsVoices(settings, apiVoices);
+            this._elevenLabsApiVoices = apiVoices;
+            const myVoices = apiVoices.filter((voice) => this._isMyElevenLabsVoice(voice));
+            this._elevenLabsVoiceCache = this._getMergedElevenLabsVoices(settings, myVoices);
             await settingsManager.save({
                 elevenlabs_api_key: apiKey,
-                elevenlabs_cloned_voices: this._elevenLabsVoiceCache,
+                elevenlabs_cloned_voices: myVoices,
             });
 
             this._syncElevenLabsVoiceOptions(settingsManager.get());

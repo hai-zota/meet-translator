@@ -212,6 +212,47 @@ pub async fn elevenlabs_create_voice(
 }
 
 #[tauri::command]
+pub async fn elevenlabs_list_voices(api_key: String) -> Result<Value, String> {
+    let api_key = sanitize_api_key(&api_key);
+    if api_key.is_empty() {
+        return Err("Missing ElevenLabs API key".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let url = "https://api.elevenlabs.io/v1/voices";
+
+    let mut response = client
+        .get(url)
+        .header("xi-api-key", &api_key)
+        .send()
+        .await
+        .map_err(|e| format!("Network error (xi-api-key): {}", e))?;
+
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        response = client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(|e| format!("Network error (bearer): {}", e))?;
+    }
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read ElevenLabs response: {}", e))?;
+
+    if !status.is_success() {
+        let message = extract_error_message(status, &body);
+        return Err(format!("HTTP {}: {}", status.as_u16(), message));
+    }
+
+    serde_json::from_str::<Value>(&body)
+        .map_err(|e| format!("Invalid ElevenLabs JSON response: {}", e))
+}
+
+#[tauri::command]
 pub fn elevenlabs_save_last_recording(
     audio_base64: String,
     mime_type: Option<String>,
