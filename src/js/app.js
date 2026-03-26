@@ -756,7 +756,10 @@ class App {
 
     _setOptionsFromSource(targetSelect, sourceSelect) {
         if (!targetSelect || !sourceSelect) return;
-        targetSelect.innerHTML = sourceSelect.innerHTML;
+        targetSelect.replaceChildren();
+        Array.from(sourceSelect.children || []).forEach((child) => {
+            targetSelect.appendChild(child.cloneNode(true));
+        });
     }
 
     _languageFlag(langCode) {
@@ -1084,8 +1087,19 @@ class App {
         }
 
         if (quickMyVoice) {
-            this._setOptionsFromSource(quickMyVoice, getVoiceSource(this.currentSource === 'dual' ? 'A' : 'A'));
-            quickMyVoice.value = this._getQuickVoiceFromSettings(settings, this.currentSource === 'dual' ? 'A' : 'single');
+            if (provider === 'elevenlabs') {
+                const langA = settings?.stream_a_language_target || settings?.target_language || 'vi';
+                const topA = this._pickTopPremadeVoicesForLanguage(langA);
+                const myVoices = this._getMyElevenLabsVoices(settings);
+                this._populateElevenLabsVoiceSelect(
+                    quickMyVoice,
+                    { topVoices: topA, myVoices },
+                    this._getQuickVoiceFromSettings(settings, this.currentSource === 'dual' ? 'A' : 'single')
+                );
+            } else {
+                this._setOptionsFromSource(quickMyVoice, getVoiceSource(this.currentSource === 'dual' ? 'A' : 'A'));
+                quickMyVoice.value = this._getQuickVoiceFromSettings(settings, this.currentSource === 'dual' ? 'A' : 'single');
+            }
         }
 
         if (quickMeetingRow) quickMeetingRow.style.display = this.currentSource === 'dual' ? '' : 'none';
@@ -1099,8 +1113,19 @@ class App {
                 this._renderQuickLanguageCollapsed(quickMeetingLang);
             }
             if (quickMeetingVoice) {
-                this._setOptionsFromSource(quickMeetingVoice, getVoiceSource('B'));
-                quickMeetingVoice.value = this._getQuickVoiceFromSettings(settings, 'B');
+                if (provider === 'elevenlabs') {
+                    const langB = settings?.stream_b_language_target || 'en';
+                    const topB = this._pickTopPremadeVoicesForLanguage(langB);
+                    const myVoices = this._getMyElevenLabsVoices(settings);
+                    this._populateElevenLabsVoiceSelect(
+                        quickMeetingVoice,
+                        { topVoices: topB, myVoices },
+                        this._getQuickVoiceFromSettings(settings, 'B')
+                    );
+                } else {
+                    this._setOptionsFromSource(quickMeetingVoice, getVoiceSource('B'));
+                    quickMeetingVoice.value = this._getQuickVoiceFromSettings(settings, 'B');
+                }
             }
         }
     }
